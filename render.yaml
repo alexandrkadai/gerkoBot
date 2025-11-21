@@ -2,8 +2,7 @@ services:
   - type: web
     name: gerkobot
     runtime: node
-    rootDir: .
-    buildCommand: npm install && npm run build && ls -la dist
+    buildCommand: npm install && npm run build && echo "=== Build complete, checking dist ===" && ls -laR dist
     startCommand: node dist/server.js
     envVars:
       - key: NODE_VERSION
