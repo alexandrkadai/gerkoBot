@@ -3,8 +3,8 @@ services:
     name: gerkobot
     runtime: node
     rootDir: .
-    buildCommand: npm install && npm run build && ls -la dist && ls -la dist/src
-    startCommand: node dist/src/server.js
+    buildCommand: npm install && npm run build && ls -la dist
+    startCommand: node dist/server.js
     envVars:
       - key: NODE_VERSION
         value: 22.16.0
