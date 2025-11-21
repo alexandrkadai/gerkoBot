@@ -9,7 +9,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "./dist",
-    "rootDir": "./",
+    "rootDir": "./src",
     "declaration": true,
     "sourceMap": true,
     "resolveJsonModule": true,
@@ -17,8 +17,7 @@
     "noEmit": false
   },
   "include": [
-    "*.ts",
-    "**/*.ts"
+    "src/**/*.ts"
   ],
   "exclude": [
     "node_modules",

@@ -9,8 +9,8 @@
     "start": "node dist/server.js",
     "build": "tsc",
     "dev": "ts-node src/server.ts",
-    "dev:ts": "tsx watch server.ts",
-    "start:ts": "tsx server.ts"
+    "dev:ts": "tsx watch src/server.ts",
+    "start:ts": "tsx src/server.ts"
   },
   "keywords": [],
   "author": "",
