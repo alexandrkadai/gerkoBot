@@ -1,5 +1,83 @@
 # GerkoBot - Telegram Support Bot
 
+## Overview
+
+A dual-bot Telegram support system with Socket.IO integration for real-time dashboard communication.
+
+- **Customer Bot**: End-users chat with automated responses and can request human support
+- **Support Bot**: Agents manage chats, take over conversations, and provide human support
+- **Socket.IO**: Real-time bidirectional communication with web dashboard
+- **Supabase**: Persistent chat history and session management
+
+## Quick Start
+
+1. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+2. **Configure environment variables:**
+   Create a `.env` file (see `.env.example` or TELEGRAM_SETUP.md)
+
+3. **Run in development:**
+   ```bash
+   npm run dev:ts
+   ```
+
+4. **Build for production:**
+   ```bash
+   npm run build
+   npm start
+   ```
+
+## Documentation
+
+- **[TELEGRAM_SETUP.md](./TELEGRAM_SETUP.md)** - Complete setup guide with:
+  - Environment configuration
+  - Webhook setup
+  - Agent commands
+  - API endpoints
+  - Database schema
+  - Troubleshooting
+
+## Key Features
+
+✅ Two-bot architecture (customer + support)  
+✅ Real-time Socket.IO communication  
+✅ Chat persistence with Supabase  
+✅ Agent takeover via Telegram  
+✅ Keyword-based auto-replies  
+✅ Human support requests  
+✅ Multi-source support (web + Telegram)  
+
+## Deployment
+
+Deployed on Render.com at: https://gerkobot.onrender.com
+
+See TELEGRAM_SETUP.md for detailed deployment instructions.
+
+## Architecture
+
+```
+┌─────────────┐         ┌──────────────┐         ┌─────────────┐
+│  Customer   │◄────────┤ Customer Bot │◄────────┤  Telegram   │
+│  (Telegram) │         └──────────────┘         │   API       │
+└─────────────┘                │                 └─────────────┘
+                               │
+                               ▼
+┌─────────────┐         ┌──────────────┐         ┌─────────────┐
+│   Web User  │◄────────┤   Socket.IO  │◄────────┤  Supabase   │
+│ (Dashboard) │         │    Server    │         │  Database   │
+└─────────────┘         └──────────────┘         └─────────────┘
+                               ▲
+                               │
+┌─────────────┐         ┌──────────────┐         ┌─────────────┐
+│   Support   │◄────────┤  Support Bot │◄────────┤  Telegram   │
+│   Agent     │         └──────────────┘         │   API       │
+│ (Telegram)  │                                  └─────────────┘
+└─────────────┘
+```
+
 A TypeScript-based Telegram bot with dashboard support for human agent handoff.
 
 ## Features
