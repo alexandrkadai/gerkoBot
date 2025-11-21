@@ -132,13 +132,10 @@ function storeMessage(chatId: string, message: Message, userId?: string) {
   if (chat) {
     chat.messages.push(message);
     
-    // Save to database asynchronously
-    const finalUserId = userId || chat.userId;
-    if (finalUserId) {
-      appendMessage(chatId, message).catch(err => {
-        console.error(`❌ Error saving message to database:`, err);
-      });
-    }
+    // Save to database asynchronously (always save if Supabase is configured)
+    appendMessage(chatId, message).catch(err => {
+      console.error(`❌ Error saving message to database:`, err);
+    });
   }
 }
 
@@ -199,7 +196,7 @@ async function handleBotReply(chatId: string, text: string, source: "web" | "tel
 // =====================================================
 // =============== CUSTOMER BOT WEBHOOK =================
 // =====================================================
-app.post("/telegram/customer/webhook", async (req, res) => {
+app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.message;
     if (!message) return res.sendStatus(200);
@@ -234,7 +231,6 @@ app.post("/telegram/customer/webhook", async (req, res) => {
         .insert({
           user_id: String(telegramUserId),
           mode: "bot",
-          source: "telegram",
           requesting_human: false
         })
         .select()
@@ -310,7 +306,7 @@ app.post("/telegram/customer/webhook", async (req, res) => {
 // =====================================================
 // =============== SUPPORT BOT WEBHOOK =================
 // =====================================================
-app.post("/telegram/support/webhook", async (req, res) => {
+app.post("/webhook", async (req, res) => {
   try {
     const message = req.body.message;
     if (!message) return res.sendStatus(200);
@@ -406,7 +402,6 @@ app.post("/telegram/support/webhook", async (req, res) => {
         .from('chat_sessions') as any)
         .update({
           mode: 'human',
-          agent_id: String(telegramId),
           requesting_human: false,
           updated_at: new Date().toISOString()
         })
@@ -583,10 +578,12 @@ app.post("/takeover", async (req, res) => {
     
     if (supabase) {
       try {
+        // Only set agent_id if it's a valid UUID (not a Telegram numeric ID)
+        const isUuid = agentId && agentId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
         await (supabase.from('chat_sessions') as any)
           .update({
             mode: 'human',
-            agent_id: agentId,
+            agent_id: isUuid ? agentId : null,
             requesting_human: false,
             updated_at: new Date().toISOString()
           })
@@ -962,7 +959,7 @@ server.listen(PORT, () => {
   console.log(`📱 Webhook URL: ${WEBHOOK_URL}`);
   console.log(`💬 Two-bot mode: Customer + Support agents via Telegram`);
   console.log(`🔌 Socket.IO enabled for real-time dashboard`);
-  console.log(`\n📋 Customer Bot Webhook: ${WEBHOOK_URL}/telegram/customer/webhook`);
+  console.log(`\n📋 Customer Bot Webhook: ${WEBHOOK_URL}/webhook`);
   console.log(`📋 Support Bot Webhook: ${WEBHOOK_URL}/telegram/support/webhook`);
 });
 

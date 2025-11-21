@@ -85,7 +85,6 @@ async function saveMessageToDatabase(chatId: string, message: Message, userId?: 
         mode: chat?.mode || 'bot',
         agent_id: chat?.agentId || null,
         requesting_human: chat?.requestingHuman || false,
-        source: chat?.source || 'web',
         user_first_name: chat?.userFirstName || null,
         user_last_name: chat?.userLastName || null
       });
@@ -201,13 +200,11 @@ function storeMessage(chatId: string, message: Message, userId?: string) {
   if (chat) {
     chat.messages.push(message);
     
-    // Save to database asynchronously
-    const finalUserId = userId || chat.userId;
-    if (finalUserId) {
-      saveMessageToDatabase(chatId, message, finalUserId).catch(err => {
-        console.error(`❌ Error saving message to database:`, err);
-      });
-    }
+    // Save to database asynchronously (always save if Supabase is configured)
+    const finalUserId = userId || chat.userId || 'anonymous';
+    saveMessageToDatabase(chatId, message, finalUserId).catch(err => {
+      console.error(`❌ Error saving message to database:`, err);
+    });
   }
 }
 
@@ -422,10 +419,12 @@ app.post("/takeover", async (req, res) => {
     // Update database session
     if (chat.userId && supabase) {
       try {
+        // Only set agent_id if it's a valid UUID (not a Telegram numeric ID)
+        const isUuid = agentId && agentId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
         await (supabase.from('chat_sessions') as any)
           .update({
             mode: 'human',
-            agent_id: agentId,
+            agent_id: isUuid ? agentId : null,
             requesting_human: false,
             updated_at: new Date().toISOString()
           })
@@ -448,11 +447,13 @@ app.post("/takeover", async (req, res) => {
     // Create database session for new chats
     if (supabase) {
       try {
+        // Only set agent_id if it's a valid UUID (not a Telegram numeric ID)
+        const isUuid = agentId && agentId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
         await (supabase.from('chat_sessions') as any).insert({
           id: String(chatId),
           user_id: agentId, // Use agentId as fallback if no userId
           mode: 'human',
-          agent_id: agentId,
+          agent_id: isUuid ? agentId : null,
           requesting_human: false
         });
         console.log(`💾 Created new chat session in database: ${chatId}`);
@@ -676,10 +677,14 @@ app.post("/api/chat/backfill", async (req, res) => {
 
           const historyRow = existingMessagesRow as { id: string; agent_id?: string | null } | null;
 
+          // Only set agent_id if it's a valid UUID (not a Telegram numeric ID)
+          const isUuid = chatState.agentId && chatState.agentId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+          const validAgentId = isUuid ? chatState.agentId : null;
+
           if (!historyRow) {
             await (supabase.from('chat_messages') as any).insert({
               chat_id: chatId,
-              agent_id: chatState.agentId || null,
+              agent_id: validAgentId,
               chat_history: history
             } as any);
           } else {
@@ -687,7 +692,7 @@ app.post("/api/chat/backfill", async (req, res) => {
               .from('chat_messages') as any)
               .update({
                 chat_history: history,
-                agent_id: chatState.agentId || historyRow.agent_id || null,
+                agent_id: validAgentId || historyRow.agent_id || null,
                 updated_at: new Date().toISOString()
               } as any)
               .eq('id', historyRow.id);

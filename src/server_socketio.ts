@@ -225,10 +225,12 @@ io.on("connection", (socket) => {
       
       if (chat.userId && supabase) {
         try {
+          // Only set agent_id if it's a valid UUID (not a Telegram numeric ID)
+          const isUuid = agentId && agentId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
           await (supabase.from('chat_sessions') as any)
             .update({
               mode: 'human',
-              agent_id: agentId,
+              agent_id: isUuid ? agentId : null,
               agent_name: agentName,
               requesting_human: false,
               updated_at: new Date().toISOString()
