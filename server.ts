@@ -2,6 +2,9 @@ import express from "express";
 import bodyParser from "body-parser";
 import axios from "axios";
 import { createClient } from "@supabase/supabase-js";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
