@@ -1,7 +1,6 @@
 import express from "express";
 import bodyParser from "body-parser";
 import axios from "axios";
-import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import http from "http";
 import { Server as IOServer } from "socket.io";
@@ -21,18 +20,7 @@ const TELEGRAM_SUPPORT_TOKEN = process.env.TELEGRAM_BOT_SUPPORT_TOKEN!;
 const customerBotUrl = `https://api.telegram.org/bot${TELEGRAM_CUSTOMER_TOKEN}`;
 const supportBotUrl = `https://api.telegram.org/bot${TELEGRAM_SUPPORT_TOKEN}`;
 
-// Initialize Supabase client
-const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-
-let supabase: ReturnType<typeof createClient> | null = null;
-
-if (SUPABASE_URL && SUPABASE_ANON_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  console.log("💾 Supabase client initialized");
-} else {
-  console.log("ℹ️ Supabase not configured - chat history will not be saved");
-}
+console.log("💬 Using Telegram-only storage (no database)");
 
 const app = express();
 app.use(cors({ origin: FRONTEND_ORIGIN }));
@@ -73,6 +61,7 @@ interface ChatState {
 
 const activeChats = new Map<string, ChatState>();
 const agentChatMap = new Map<number, string>(); // agent telegram ID → active chat ID
+const userChatMap = new Map<number, string>(); // Telegram user ID → current chat ID
 
 // =====================================================
 // UTIL
@@ -89,53 +78,20 @@ async function tgSend(botUrl: string, chatId: number | string, text: string) {
   }
 }
 
-async function appendMessage(chatId: string, msg: any) {
-  if (!supabase) return;
-
-  try {
-    const { data, error } = await supabase
-      .from("chat_messages")
-      .select("id, chat_history")
-      .eq("chat_id", chatId)
-      .eq("archived", false)
-      .maybeSingle();
-
-    if (error) throw error;
-
-    if (!data) {
-      // Create new chat_messages entry
-      await (supabase.from('chat_messages') as any).insert({
-        chat_id: chatId,
-        chat_history: [msg]
-      });
-      console.log(`💾 Created chat_messages row with initial message: ${chatId}`);
-    } else {
-      const updated = [...(data as any).chat_history, msg];
-      await (supabase.from('chat_messages') as any)
-        .update({ chat_history: updated, updated_at: new Date().toISOString() })
-        .eq("id", (data as any).id);
-      console.log(`💾 Appended message to chat_history for chat ${chatId}`);
-    }
-  } catch (error) {
-    console.error(`❌ Failed to append message:`, error);
-  }
-}
+// Message storage is now in-memory only via activeChats Map
+// All messages are stored in the ChatState.messages array
 
 // Helper to emit chat event to dashboard
 function emitToDashboard(event: string, payload: any) {
   io.emit(event, payload);
 }
 
-// Helper to store message in chat history
+// Helper to store message in chat history (in-memory only)
 function storeMessage(chatId: string, message: Message, userId?: string) {
   const chat = activeChats.get(chatId);
   if (chat) {
     chat.messages.push(message);
-    
-    // Save to database asynchronously (always save if Supabase is configured)
-    appendMessage(chatId, message).catch(err => {
-      console.error(`❌ Error saving message to database:`, err);
-    });
+    console.log(`💾 Stored message in memory for chat ${chatId}`);
   }
 }
 
@@ -209,41 +165,14 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📨 Telegram customer message from ${from} (${telegramUserId}): ${text}`);
 
-    if (!supabase) {
-      console.error("❌ Supabase not configured");
-      return res.sendStatus(200);
-    }
-
-    // 1. Find or create chat session
-    let chatSession = await supabase
-      .from("chat_sessions")
-      .select("*")
-      .eq("user_id", String(telegramUserId))
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    let chatId: string;
-
-    if (chatSession.error || !chatSession.data) {
-      const created = await (supabase
-        .from("chat_sessions") as any)
-        .insert({
-          user_id: String(telegramUserId),
-          mode: "bot",
-          requesting_human: false
-        })
-        .select()
-        .single();
+    // Generate a unique chat ID for each new user or get existing one
+    let chatId = userChatMap.get(telegramUserId);
+    
+    if (!chatId || !activeChats.has(chatId)) {
+      // Create new chat for this user
+      chatId = `tg_${telegramUserId}_${Date.now()}`;
+      userChatMap.set(telegramUserId, chatId);
       
-      chatId = created.data.id;
-      console.log(`✨ New Telegram chat session created: ${chatId}`);
-    } else {
-      chatId = (chatSession.data as any).id;
-    }
-
-    // Ensure chat exists in active chats
-    if (!activeChats.has(chatId)) {
       activeChats.set(chatId, {
         mode: "bot",
         messages: [],
@@ -253,12 +182,21 @@ app.post("/webhook", async (req, res) => {
         userId: String(telegramUserId),
         telegramUserId: telegramUserId
       });
-      console.log(`✨ New Telegram active chat: ${chatId} (${from})`);
+      
+      console.log(`✨ New Telegram chat created: ${chatId} for user ${from}`);
+      
+      // Notify dashboard about new chat
+      emitToDashboard("chat_mode_changed", {
+        chatId,
+        mode: "bot",
+        userFirstName: firstName,
+        userLastName: lastName
+      });
     } else {
+      // Update user info if changed
       const chat = activeChats.get(chatId)!;
       chat.userFirstName = firstName;
       chat.userLastName = lastName;
-      chat.telegramUserId = telegramUserId;
     }
 
     const chatState = activeChats.get(chatId)!;
@@ -306,7 +244,7 @@ app.post("/webhook", async (req, res) => {
 // =====================================================
 // =============== SUPPORT BOT WEBHOOK =================
 // =====================================================
-app.post("/webhook", async (req, res) => {
+app.post("/telegram/support/webhook", async (req, res) => {
   try {
     const message = req.body.message;
     if (!message) return res.sendStatus(200);
@@ -315,20 +253,8 @@ app.post("/webhook", async (req, res) => {
     const text = message.text ?? "";
     const agentName = `${message.from.first_name ?? "Agent"}`;
 
-    if (!supabase) {
-      console.error("❌ Supabase not configured");
-      return res.sendStatus(200);
-    }
-
     // 1. Register agent
     if (text === "/start") {
-      await (supabase
-        .from("support_agents") as any)
-        .upsert({
-          telegram_id: telegramId,
-          name: agentName,
-          is_active: true,
-        });
 
       await tgSend(
         supportBotUrl,
@@ -345,22 +271,19 @@ app.post("/webhook", async (req, res) => {
 
     // 2. List active chats
     if (text === "/list") {
-      const { data } = await supabase
-        .from("chat_sessions")
-        .select("id, user_id, mode, requesting_human, updated_at")
-        .order("updated_at", { ascending: false })
-        .limit(20);
-
-      if (!data || data.length === 0) {
+      const chats = Array.from(activeChats.entries());
+      
+      if (chats.length === 0) {
         await tgSend(supportBotUrl, telegramId, "No active chats.");
         return res.sendStatus(200);
       }
 
       let msg = "📂 <b>Active chats:</b>\n\n";
-      for (const c of data as any[]) {
-        const requestFlag = c.requesting_human ? "🙋 " : "";
-        const modeIcon = c.mode === "human" ? "👤" : "🤖";
-        msg += `${requestFlag}${modeIcon} <code>${c.id}</code> — user ${c.user_id}\n`;
+      for (const [chatId, chat] of chats) {
+        const requestFlag = chat.requestingHuman ? "🙋 " : "";
+        const modeIcon = chat.mode === "human" ? "👤" : "🤖";
+        const userName = `${chat.userFirstName || ''} ${chat.userLastName || ''}`.trim() || chat.userId || 'Unknown';
+        msg += `${requestFlag}${modeIcon} <code>${chatId}</code> — ${userName}\n`;
       }
 
       await tgSend(supportBotUrl, telegramId, msg);
@@ -397,16 +320,6 @@ app.post("/webhook", async (req, res) => {
         storeMessage(chatId, systemMessage);
       }
 
-      // Update database
-      await (supabase
-        .from('chat_sessions') as any)
-        .update({
-          mode: 'human',
-          requesting_human: false,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', chatId);
-
       // Notify dashboard
       emitToDashboard("chat_mode_changed", {
         chatId,
@@ -441,17 +354,6 @@ app.post("/webhook", async (req, res) => {
         delete chat.agentName;
         chat.requestingHuman = false;
       }
-
-      // Update database
-      await (supabase
-        .from('chat_sessions') as any)
-        .update({
-          mode: 'bot',
-          agent_id: null,
-          requesting_human: false,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', currentChat);
 
       emitToDashboard("chat_mode_changed", {
         chatId: currentChat,
@@ -575,23 +477,6 @@ app.post("/takeover", async (req, res) => {
       };
       storeMessage(String(chatId), systemMessage, chat.userId);
     }
-    
-    if (supabase) {
-      try {
-        // Only set agent_id if it's a valid UUID (not a Telegram numeric ID)
-        const isUuid = agentId && agentId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-        await (supabase.from('chat_sessions') as any)
-          .update({
-            mode: 'human',
-            agent_id: isUuid ? agentId : null,
-            requesting_human: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', chatId);
-      } catch (error) {
-        console.error(`❌ Failed to update chat session:`, error);
-      }
-    }
   }
   
   emitToDashboard("chat_mode_changed", { 
@@ -618,21 +503,6 @@ app.post("/release", async (req, res) => {
     delete chat.agentId;
     delete chat.agentName;
     chat.requestingHuman = false;
-    
-    if (supabase) {
-      try {
-        await (supabase.from('chat_sessions') as any)
-          .update({
-            mode: 'bot',
-            agent_id: null,
-            requesting_human: false,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', chatId);
-      } catch (error) {
-        console.error(`❌ Failed to update chat session:`, error);
-      }
-    }
   }
   
   emitToDashboard("chat_mode_changed", { 
@@ -644,7 +514,7 @@ app.post("/release", async (req, res) => {
   return res.json({ ok: true });
 });
 
-// Get or create chat session
+// Get or create chat session (in-memory only)
 app.post("/api/chat/session", async (req, res) => {
   const { chatId, userId } = req.body;
   
@@ -652,58 +522,48 @@ app.post("/api/chat/session", async (req, res) => {
     return res.status(400).json({ error: "Missing chatId or userId" });
   }
 
-  if (!supabase) {
-    return res.status(503).json({ error: "Database not configured" });
-  }
-
   try {
-    const { data: existing } = await supabase
-      .from('chat_sessions')
-      .select('*')
-      .eq('id', chatId)
-      .maybeSingle();
-
-    if (existing) {
-      return res.json({ session: existing, created: false });
+    let chat = activeChats.get(chatId);
+    let created = false;
+    
+    if (!chat) {
+      // Create new chat session in memory
+      activeChats.set(chatId, {
+        mode: "bot",
+        messages: [],
+        source: "web",
+        userId: userId,
+        requestingHuman: false
+      });
+      created = true;
+      console.log(`✨ New web chat session created: ${chatId}`);
     }
-
-    const { data: newSession, error } = await (supabase
-      .from('chat_sessions') as any)
-      .insert({
+    
+    chat = activeChats.get(chatId)!;
+    
+    return res.json({ 
+      session: {
         id: chatId,
         user_id: userId,
-        mode: 'bot',
-        requesting_human: false,
-        source: 'web'
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    return res.json({ session: newSession, created: true });
+        mode: chat.mode,
+        requesting_human: chat.requestingHuman,
+        source: chat.source
+      }, 
+      created 
+    });
   } catch (error: any) {
     console.error("Failed to create/get chat session:", error);
     return res.status(500).json({ error: error.message });
   }
 });
 
-// Load chat history
+// Load chat history (from memory)
 app.get("/api/chat/history/:chatId", async (req, res) => {
   const { chatId } = req.params;
 
-  if (!supabase) {
-    return res.status(503).json({ error: "Database not configured" });
-  }
-
   try {
-    const { data } = await supabase
-      .from('chat_messages')
-      .select('chat_history')
-      .eq('chat_id', chatId)
-      .maybeSingle();
-
-    const messages = ((data as any)?.chat_history || []) as Message[];
+    const chat = activeChats.get(chatId);
+    const messages = chat?.messages || [];
     return res.json({ messages });
   } catch (error: any) {
     console.error("Failed to load chat history:", error);
@@ -711,43 +571,30 @@ app.get("/api/chat/history/:chatId", async (req, res) => {
   }
 });
 
-// Get user's chat sessions
+// Get user's chat sessions (from memory)
 app.get("/api/chat/sessions/:userId", async (req, res) => {
   const { userId } = req.params;
 
-  if (!supabase) {
-    return res.status(503).json({ error: "Database not configured" });
-  }
-
   try {
-    const { data: sessions, error } = await supabase
-      .from('chat_sessions')
-      .select('id, created_at, updated_at, mode')
-      .eq('user_id', userId)
-      .order('updated_at', { ascending: false })
-      .limit(20);
+    const sessions: any[] = [];
+    
+    for (const [chatId, chat] of activeChats.entries()) {
+      if (chat.userId === userId) {
+        const lastMessage = chat.messages.length > 0 
+          ? chat.messages[chat.messages.length - 1] 
+          : null;
+        
+        sessions.push({
+          id: chatId,
+          mode: chat.mode,
+          source: chat.source,
+          lastMessage: lastMessage?.text || 'No messages yet',
+          messageCount: chat.messages.length
+        });
+      }
+    }
 
-    if (error) throw error;
-
-    const sessionsWithLastMessage = await Promise.all(
-      (sessions || []).map(async (session: any) => {
-        const { data: chatMessages } = await supabase
-          .from('chat_messages')
-          .select('chat_history')
-          .eq('chat_id', session.id)
-          .maybeSingle();
-
-        const history = (chatMessages as any)?.chat_history || [];
-        const lastMessage = history.length > 0 ? history[history.length - 1] : null;
-
-        return {
-          ...session,
-          lastMessage: lastMessage?.text || 'No messages yet'
-        };
-      })
-    );
-
-    return res.json({ sessions: sessionsWithLastMessage });
+    return res.json({ sessions });
   } catch (error: any) {
     console.error("Failed to load chat sessions:", error);
     return res.status(500).json({ error: error.message });
@@ -787,6 +634,7 @@ io.on("connection", (socket) => {
     console.log(`📨 Web user message from ${chatId}: ${text}`);
 
     if (!activeChats.has(chatId)) {
+      // Create new chat for web user
       activeChats.set(chatId, {
         mode: "bot",
         messages: [],
@@ -795,6 +643,8 @@ io.on("connection", (socket) => {
         userLastName,
         userId
       });
+      
+      console.log(`✨ New web chat created: ${chatId} for user ${userFirstName} ${userLastName}`);
       
       emitToDashboard("chat_mode_changed", {
         chatId,
