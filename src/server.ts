@@ -646,20 +646,76 @@ app.post("/telegram/support/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // Save agent message
+      // Extract file data if agent sent a file
+      let fileUrl = "";
+      let fileName = "";
+      let fileType = "";
+
+      if (message.photo && message.photo.length > 0) {
+        const photo = message.photo[message.photo.length - 1];
+        const fileId = photo.file_id;
+        try {
+          const fileRes = await axios.get(`${supportBotUrl}/getFile?file_id=${fileId}`);
+          const filePath = fileRes.data.result.file_path;
+          fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_SUPPORT_TOKEN}/${filePath}`;
+          fileName = `photo_${Date.now()}.jpg`;
+          fileType = "image/jpeg";
+          console.log(`📷 Agent sent photo: ${fileUrl}`);
+        } catch (err) {
+          console.error("Error getting agent photo:", err);
+        }
+      } else if (message.document) {
+        const doc = message.document;
+        const fileId = doc.file_id;
+        try {
+          const fileRes = await axios.get(`${supportBotUrl}/getFile?file_id=${fileId}`);
+          const filePath = fileRes.data.result.file_path;
+          fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_SUPPORT_TOKEN}/${filePath}`;
+          fileName = doc.file_name || `document_${Date.now()}`;
+          fileType = doc.mime_type || "application/octet-stream";
+          console.log(`📎 Agent sent document: ${fileName}`);
+        } catch (err) {
+          console.error("Error getting agent document:", err);
+        }
+      }
+
+      const messageText = message.text || message.caption || "";
+
+      // Save agent message with file data
       const agentMessage: Message = {
         from: "agent",
-        text,
+        text: messageText || (fileUrl ? `📎 ${fileName}` : ""),
         timestamp: Date.now(),
         agentId: String(telegramId),
-        agentName
+        agentName,
+        fileUrl,
+        fileName,
+        fileType
       };
       storeMessage(currentChat, agentMessage);
 
       // Send to customer based on source
       if (chat.source === "telegram" && chat.telegramUserId) {
-        // Telegram user - send via customer bot
-        await tgSend(customerBotUrl, chat.telegramUserId, text);
+        // Telegram user - forward file or text
+        if (fileUrl) {
+          if (fileType.startsWith("image/")) {
+            await axios.post(`${customerBotUrl}/sendPhoto`, {
+              chat_id: chat.telegramUserId,
+              photo: fileUrl,
+              caption: messageText,
+              parse_mode: "HTML"
+            });
+          } else {
+            await axios.post(`${customerBotUrl}/sendDocument`, {
+              chat_id: chat.telegramUserId,
+              document: fileUrl,
+              caption: messageText,
+              parse_mode: "HTML"
+            });
+          }
+        } else {
+          await tgSend(customerBotUrl, chat.telegramUserId, messageText);
+        }
       } else if (chat.source === "web") {
         // Web user - send via Socket.IO (handled by emitToDashboard below)
         console.log(`📤 Sending agent message to web user via Socket.IO: ${currentChat}`);
@@ -668,12 +724,15 @@ app.post("/telegram/support/webhook", async (req, res) => {
       // Notify dashboard (this sends to web users via Socket.IO)
       emitToDashboard("message_from_agent", {
         chatId: currentChat,
-        message: text,
+        message: messageText || (fileUrl ? `📎 ${fileName}` : ""),
         agentId: String(telegramId),
-        agentName
+        agentName,
+        fileUrl,
+        fileName,
+        fileType
       });
 
-      console.log(`👨‍💼 Agent ${agentName} sent message to ${currentChat} (${chat.source})`);
+      console.log(`👨‍💼 Agent ${agentName} sent ${fileUrl ? 'file' : 'text'} to ${currentChat} (${chat.source})`);
       return res.sendStatus(200);
     }
 
@@ -993,21 +1052,33 @@ io.on("connection", (socket) => {
         const senderName = chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : "User";
         
         if (fileUrl) {
-          // Send file to agent via Telegram
-          if (fileType?.startsWith("image/")) {
-            await axios.post(`${supportBotUrl}/sendPhoto`, {
-              chat_id: agentTelegramId,
-              photo: fileUrl,
-              caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
-              parse_mode: "HTML"
-            });
+          // Check if it's a base64 file or URL
+          if (fileUrl.startsWith('data:')) {
+            // Base64 file - Telegram API doesn't support base64 directly
+            // For now, just send text notification. TODO: Upload to cloud storage first
+            await tgSend(
+              supportBotUrl,
+              agentTelegramId,
+              `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}\n\n📎 User sent a file: <code>${fileName}</code>\n⚠️ File preview not available (needs cloud storage integration)`
+            );
+            console.log(`⚠️ Base64 file detected - Telegram API needs URL or cloud storage`);
           } else {
-            await axios.post(`${supportBotUrl}/sendDocument`, {
-              chat_id: agentTelegramId,
-              document: fileUrl,
-              caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
-              parse_mode: "HTML"
-            });
+            // URL-based file - send directly
+            if (fileType?.startsWith("image/")) {
+              await axios.post(`${supportBotUrl}/sendPhoto`, {
+                chat_id: agentTelegramId,
+                photo: fileUrl,
+                caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
+                parse_mode: "HTML"
+              });
+            } else {
+              await axios.post(`${supportBotUrl}/sendDocument`, {
+                chat_id: agentTelegramId,
+                document: fileUrl,
+                caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
+                parse_mode: "HTML"
+              });
+            }
           }
         } else {
           await tgSend(
