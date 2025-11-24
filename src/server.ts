@@ -44,6 +44,9 @@ interface Message {
   timestamp: number;
   agentId?: string;
   agentName?: string;
+  fileUrl?: string;
+  fileName?: string;
+  fileType?: string;
 }
 
 interface ChatState {
@@ -57,6 +60,8 @@ interface ChatState {
   userLastName?: string;
   userId?: string;
   telegramUserId?: number; // Telegram user ID for customer bot
+  createdAt: number;
+  lastActivityAt: number;
 }
 
 const activeChats = new Map<string, ChatState>();
@@ -113,6 +118,7 @@ function storeMessage(chatId: string, message: Message, userId?: string) {
   const chat = activeChats.get(chatId);
   if (chat) {
     chat.messages.push(message);
+    chat.lastActivityAt = Date.now();
     console.log(`💾 Stored message in memory for chat ${chatId}`);
   }
 }
@@ -152,7 +158,33 @@ async function handleBotReply(chatId: string, text: string, source: "web" | "tel
     chat.requestingHuman = true;
     emitToDashboard("human_support_requested", { chatId });
     await sendBotMessage(chatId, "🙋 I've notified our support team. An agent will join you shortly.", source);
-    console.log(`🙋 Human support requested for chat ${chatId}`);
+    
+    // Immediately notify all agents
+    const userName = chat.userFirstName 
+      ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+      : 'Anonymous';
+    const sourceIcon = chat.source === "web" ? "🌐" : "📱";
+    
+    for (const agentId of registeredAgents) {
+      try {
+        await axios.post(`${supportBotUrl}/sendMessage`, {
+          chat_id: agentId,
+          text: `🙋 <b>SUPPORT REQUESTED!</b>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nID: <code>${chatId}</code>\n\nUser needs help!`,
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "📖 Open Chat", callback_data: `open_${chatId}` }
+              ]
+            ]
+          }
+        });
+      } catch (error) {
+        console.error(`Failed to notify agent ${agentId}:`, error);
+      }
+    }
+    
+    console.log(`🙋 Human support requested for chat ${chatId} - notified ${registeredAgents.size} agents`);
     return;
   }
 
@@ -202,7 +234,9 @@ app.post("/webhook", async (req, res) => {
         userFirstName: firstName,
         userLastName: lastName,
         userId: String(telegramUserId),
-        telegramUserId: telegramUserId
+        telegramUserId: telegramUserId,
+        createdAt: Date.now(),
+        lastActivityAt: Date.now()
       });
       
       console.log(`✨ New Telegram chat created: ${chatId} for user ${from}`);
@@ -268,6 +302,85 @@ app.post("/webhook", async (req, res) => {
 // =====================================================
 app.post("/telegram/support/webhook", async (req, res) => {
   try {
+    // Handle callback queries (button clicks)
+    const callbackQuery = req.body.callback_query;
+    if (callbackQuery) {
+      const telegramId = callbackQuery.from.id;
+      const agentName = `${callbackQuery.from.first_name ?? "Agent"}`;
+      const data = callbackQuery.data;
+
+      // Answer callback query to remove loading state
+      await axios.post(`${supportBotUrl}/answerCallbackQuery`, {
+        callback_query_id: callbackQuery.id
+      });
+
+      // Handle "open chat" button
+      if (data.startsWith("open_")) {
+        const chatId = data.replace("open_", "");
+        
+        // Execute the open logic
+        agentChatMap.set(telegramId, chatId);
+        const chat = activeChats.get(chatId);
+
+        if (chat) {
+          chat.mode = "human";
+          chat.agentId = String(telegramId);
+          chat.agentName = agentName;
+          chat.requestingHuman = false;
+
+          const systemMessage: Message = {
+            from: "system",
+            text: `${agentName} connected`,
+            timestamp: Date.now()
+          };
+          storeMessage(chatId, systemMessage);
+        }
+
+        emitToDashboard("chat_mode_changed", {
+          chatId,
+          mode: "human",
+          agentId: String(telegramId),
+          agentName
+        });
+
+        if (chat) {
+          const userName = chat.userFirstName 
+            ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+            : 'Anonymous';
+          const sourceIcon = chat.source === "web" ? "🌐" : "📱";
+          
+          await tgSend(supportBotUrl, telegramId, `✅ Chat opened: <code>${chatId}</code>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}`);
+          
+          if (chat.messages.length === 0) {
+            await tgSend(supportBotUrl, telegramId, "📭 Chat is empty. No messages yet.");
+          } else {
+            await tgSend(supportBotUrl, telegramId, `📜 Chat history (last 30 messages):`);
+
+            for (const msg of chat.messages.slice(-30)) {
+              const author =
+                msg.from === "user" ? "🧑 User" :
+                msg.from === "agent" ? `👨‍💼 ${msg.agentName || 'Agent'}` :
+                msg.from === "bot" ? "🤖 Bot" :
+                "⚙️ System";
+
+              let msgText = `${author}:\n${msg.text}`;
+              if (msg.fileUrl) {
+                msgText += `\n📎 File: ${msg.fileName || 'attachment'}`;
+              }
+
+              await tgSend(supportBotUrl, telegramId, msgText);
+            }
+            
+            await tgSend(supportBotUrl, telegramId, "✏️ Type your message to reply to the user.");
+          }
+        } else {
+          await tgSend(supportBotUrl, telegramId, `❌ Chat <code>${chatId}</code> not found.`);
+        }
+      }
+
+      return res.sendStatus(200);
+    }
+
     const message = req.body.message;
     if (!message) return res.sendStatus(200);
 
@@ -303,15 +416,51 @@ app.post("/telegram/support/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      let msg = "📂 <b>Active chats:</b>\n\n";
-      for (const [chatId, chat] of chats) {
-        const requestFlag = chat.requestingHuman ? "🙋 " : "";
-        const modeIcon = chat.mode === "human" ? "👤" : "🤖";
-        const userName = `${chat.userFirstName || ''} ${chat.userLastName || ''}`.trim() || chat.userId || 'Unknown';
-        msg += `${requestFlag}${modeIcon} <code>${chatId}</code> — ${userName}\n`;
-      }
+      // Sort by last activity (most recent first)
+      const sortedChats = chats.sort((a, b) => b[1].lastActivityAt - a[1].lastActivityAt);
 
-      await tgSend(supportBotUrl, telegramId, msg);
+      for (const [chatId, chat] of sortedChats) {
+        const requestFlag = chat.requestingHuman ? "🙋 <b>NEEDS HELP</b>" : "";
+        const modeIcon = chat.mode === "human" ? "👤" : "🤖";
+        const userName = `${chat.userFirstName || ''} ${chat.userLastName || ''}`.trim() || 'Anonymous';
+        const sourceIcon = chat.source === "web" ? "🌐" : "📱";
+        
+        // Format timestamps
+        const createdTime = new Date(chat.createdAt).toLocaleString('en-US', { 
+          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' 
+        });
+        const lastActivityTime = new Date(chat.lastActivityAt).toLocaleString('en-US', { 
+          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' 
+        });
+        
+        const msgCount = chat.messages.length;
+        const agentInfo = chat.mode === "human" && chat.agentName ? `\n   Agent: ${chat.agentName}` : "";
+        
+        let msg = `${requestFlag}\n${modeIcon} <b>${userName}</b> ${sourceIcon}\n`;
+        msg += `   Created: ${createdTime}\n`;
+        msg += `   Last activity: ${lastActivityTime}\n`;
+        msg += `   Messages: ${msgCount}${agentInfo}\n`;
+        msg += `   ID: <code>${chatId}</code>`;
+
+        // Send message with inline button to open chat
+        try {
+          await axios.post(`${supportBotUrl}/sendMessage`, {
+            chat_id: telegramId,
+            text: msg,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "📖 Open Chat", callback_data: `open_${chatId}` }
+                ]
+              ]
+            }
+          });
+        } catch (error) {
+          console.error("Failed to send chat with button:", error);
+        }
+      }
+      
       return res.sendStatus(200);
     }
 
@@ -598,7 +747,9 @@ app.post("/api/chat/session", async (req, res) => {
         messages: [],
         source: "web",
         userId: userId,
-        requestingHuman: false
+        requestingHuman: false,
+        createdAt: Date.now(),
+        lastActivityAt: Date.now()
       });
       created = true;
       console.log(`✨ New web chat session created: ${chatId}`);
@@ -708,7 +859,9 @@ io.on("connection", (socket) => {
         source: "web",
         userFirstName,
         userLastName,
-        userId
+        userId,
+        createdAt: Date.now(),
+        lastActivityAt: Date.now()
       });
       
       console.log(`✨ New web chat created: ${chatId} for user ${userFirstName} ${userLastName}`);
@@ -921,4 +1074,3 @@ process.on('SIGTERM', () => {
     process.exit(0);
   });
 });
-
