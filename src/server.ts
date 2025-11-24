@@ -212,12 +212,46 @@ app.post("/webhook", async (req, res) => {
     if (!message) return res.sendStatus(200);
 
     const telegramUserId = message.from.id;
-    const text = message.text ?? "";
+    const text = message.text || message.caption || "";
     const firstName = message.from?.first_name || "";
     const lastName = message.from?.last_name || "";
     const from = `${firstName} ${lastName}`.trim();
 
     console.log(`📨 Telegram customer message from ${from} (${telegramUserId}): ${text}`);
+
+    // Extract file data if present
+    let fileUrl = "";
+    let fileName = "";
+    let fileType = "";
+
+    if (message.photo && message.photo.length > 0) {
+      // Get the largest photo
+      const photo = message.photo[message.photo.length - 1];
+      const fileId = photo.file_id;
+      try {
+        const fileRes = await axios.get(`${customerBotUrl}/getFile?file_id=${fileId}`);
+        const filePath = fileRes.data.result.file_path;
+        fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_CUSTOMER_TOKEN}/${filePath}`;
+        fileName = `photo_${Date.now()}.jpg`;
+        fileType = "image/jpeg";
+        console.log(`📷 Photo received: ${fileUrl}`);
+      } catch (err) {
+        console.error("Error getting photo file:", err);
+      }
+    } else if (message.document) {
+      const doc = message.document;
+      const fileId = doc.file_id;
+      try {
+        const fileRes = await axios.get(`${customerBotUrl}/getFile?file_id=${fileId}`);
+        const filePath = fileRes.data.result.file_path;
+        fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_CUSTOMER_TOKEN}/${filePath}`;
+        fileName = doc.file_name || `document_${Date.now()}`;
+        fileType = doc.mime_type || "application/octet-stream";
+        console.log(`📎 Document received: ${fileName}`);
+      } catch (err) {
+        console.error("Error getting document file:", err);
+      }
+    }
 
     // Generate a unique chat ID for each new user or get existing one
     let chatId = userChatMap.get(telegramUserId);
@@ -257,19 +291,25 @@ app.post("/webhook", async (req, res) => {
 
     const chatState = activeChats.get(chatId)!;
 
-    // 2. Store user message
+    // 2. Store user message with file data
     const userMessage: Message = {
       from: "user",
-      text,
-      timestamp: Date.now()
+      text: text || (fileUrl ? `📎 ${fileName}` : ""),
+      timestamp: Date.now(),
+      fileUrl,
+      fileName,
+      fileType
     };
     storeMessage(chatId, userMessage, String(telegramUserId));
 
     // 3. Forward to dashboard
     emitToDashboard("message_from_user", {
       chatId,
-      text,
+      text: text || (fileUrl ? `📎 ${fileName}` : ""),
       from,
+      fileUrl,
+      fileName,
+      fileType,
       raw: message
     });
 
@@ -277,11 +317,32 @@ app.post("/webhook", async (req, res) => {
     if (chatState.mode === "human" && chatState.agentId) {
       const agentTelegramId = parseInt(chatState.agentId);
       if (!isNaN(agentTelegramId)) {
-        await tgSend(
-          supportBotUrl,
-          agentTelegramId,
-          `💬 Message from <b>${from}</b> (Chat: <code>${chatId}</code>):\n\n${text}`
-        );
+        let messageText = `💬 Message from <b>${from}</b> (Chat: <code>${chatId}</code>):\n\n${text}`;
+        
+        if (fileUrl) {
+          // Send file to agent
+          if (fileType.startsWith("image/")) {
+            await axios.post(`${supportBotUrl}/sendPhoto`, {
+              chat_id: agentTelegramId,
+              photo: fileUrl,
+              caption: messageText,
+              parse_mode: "HTML"
+            });
+          } else {
+            await axios.post(`${supportBotUrl}/sendDocument`, {
+              chat_id: agentTelegramId,
+              document: fileUrl,
+              caption: messageText,
+              parse_mode: "HTML"
+            });
+          }
+        } else {
+          await tgSend(
+            supportBotUrl,
+            agentTelegramId,
+            messageText
+          );
+        }
       }
       console.log(`👤 Telegram chat ${chatId} is in human mode - forwarded to agent`);
       return res.sendStatus(200);
@@ -840,14 +901,36 @@ io.on("connection", (socket) => {
   console.log(`📸 Sent snapshot of ${snapshot.length} chats`);
 
   // Handle WEB USER MESSAGES
-  socket.on("user_message", async ({ chatId, text, userFirstName, userLastName, userId }: { 
+  socket.on("user_message", async ({ 
+    chatId, 
+    message,
+    text,
+    firstName, 
+    userFirstName,
+    lastName,
+    userLastName, 
+    userId,
+    fileUrl,
+    fileName,
+    fileType
+  }: { 
     chatId: string; 
-    text: string; 
+    message?: string;
+    text?: string;
+    firstName?: string;
     userFirstName?: string; 
+    lastName?: string;
     userLastName?: string;
     userId?: string;
+    fileUrl?: string;
+    fileName?: string;
+    fileType?: string;
   }) => {
-    console.log(`📨 Web user message from ${chatId}: ${text}`);
+    const messageText = message || text || "";
+    const fName = firstName || userFirstName;
+    const lName = lastName || userLastName;
+    
+    console.log(`📨 Web user message from ${chatId}: ${messageText}${fileUrl ? ` [+ file: ${fileName}]` : ""}`);
 
     const isNewChat = !activeChats.has(chatId);
     
@@ -857,28 +940,28 @@ io.on("connection", (socket) => {
         mode: "bot",
         messages: [],
         source: "web",
-        userFirstName,
-        userLastName,
+        userFirstName: fName,
+        userLastName: lName,
         userId,
         createdAt: Date.now(),
         lastActivityAt: Date.now()
       });
       
-      console.log(`✨ New web chat created: ${chatId} for user ${userFirstName} ${userLastName}`);
+      console.log(`✨ New web chat created: ${chatId} for user ${fName} ${lName}`);
       
       emitToDashboard("chat_mode_changed", {
         chatId,
         mode: "bot",
-        userFirstName,
-        userLastName
+        userFirstName: fName,
+        userLastName: lName
       });
       
       // Notify all agents about new web chat
-      await notifyAgents(chatId, text, true);
+      await notifyAgents(chatId, messageText, true);
     } else {
       const chat = activeChats.get(chatId)!;
-      if (userFirstName) chat.userFirstName = userFirstName;
-      if (userLastName) chat.userLastName = userLastName;
+      if (fName) chat.userFirstName = fName;
+      if (lName) chat.userLastName = lName;
       if (userId) chat.userId = userId;
     }
 
@@ -886,30 +969,72 @@ io.on("connection", (socket) => {
 
     const userMessage: Message = {
       from: "user",
-      text,
-      timestamp: Date.now()
+      text: messageText || (fileUrl ? `📎 ${fileName}` : ""),
+      timestamp: Date.now(),
+      fileUrl,
+      fileName,
+      fileType
     };
     storeMessage(chatId, userMessage, userId);
 
     emitToDashboard("message_from_user", { 
       chatId, 
-      text,
-      from: chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : undefined
+      text: messageText,
+      from: chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : undefined,
+      fileUrl,
+      fileName,
+      fileType
     });
 
     // If in human mode, send message directly to the agent handling this chat
-    if (chat.mode === "human" && chat.agentId && !isNewChat) {
+    if (chat.mode === "human" && chat.agentId) {
       const agentTelegramId = parseInt(chat.agentId);
       if (!isNaN(agentTelegramId)) {
-        const userName = chat.userFirstName 
-          ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
-          : 'User';
-        await tgSend(supportBotUrl, agentTelegramId, `💬 ${userName}:\n${text}`);
+        const senderName = chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : "User";
+        
+        if (fileUrl) {
+          // Send file to agent via Telegram
+          if (fileType?.startsWith("image/")) {
+            await axios.post(`${supportBotUrl}/sendPhoto`, {
+              chat_id: agentTelegramId,
+              photo: fileUrl,
+              caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
+              parse_mode: "HTML"
+            });
+          } else {
+            await axios.post(`${supportBotUrl}/sendDocument`, {
+              chat_id: agentTelegramId,
+              document: fileUrl,
+              caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
+              parse_mode: "HTML"
+            });
+          }
+        } else {
+          await tgSend(
+            supportBotUrl,
+            agentTelegramId,
+            `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`
+          );
+        }
+        console.log(`🔀 Forwarded web message with ${fileUrl ? 'file' : 'text'} to agent ${chat.agentName}`);
       }
       return;
     }
 
-    await handleBotReply(chatId, text, "web");
+    // 5. Bot auto-reply (only if not in human mode)
+    if (messageText || !fileUrl) {
+      await handleBotReply(chatId, messageText, "web");
+    } else {
+      // If only file, send acknowledgment
+      const botResponse = "Thank you for sending that file! How can I help you today?";
+      const botMessage: Message = {
+        from: "bot",
+        text: botResponse,
+        timestamp: Date.now()
+      };
+      storeMessage(chatId, botMessage, userId);
+      emitToDashboard("message_from_bot", { chatId, text: botResponse });
+    }
   });
 
   // Handle user info updates
@@ -1074,3 +1199,4 @@ process.on('SIGTERM', () => {
     process.exit(0);
   });
 });
+
