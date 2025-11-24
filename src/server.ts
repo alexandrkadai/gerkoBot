@@ -62,6 +62,7 @@ interface ChatState {
 const activeChats = new Map<string, ChatState>();
 const agentChatMap = new Map<number, string>(); // agent telegram ID → active chat ID
 const userChatMap = new Map<number, string>(); // Telegram user ID → current chat ID
+const registeredAgents = new Set<number>(); // Telegram IDs of registered support agents
 
 // =====================================================
 // UTIL
@@ -84,6 +85,27 @@ async function tgSend(botUrl: string, chatId: number | string, text: string) {
 // Helper to emit chat event to dashboard
 function emitToDashboard(event: string, payload: any) {
   io.emit(event, payload);
+}
+
+// Helper to notify all registered agents about new/updated chats
+async function notifyAgents(chatId: string, message: string, isNewChat: boolean = false) {
+  const chat = activeChats.get(chatId);
+  if (!chat) return;
+
+  const userName = chat.userFirstName 
+    ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+    : 'Anonymous';
+
+  const notification = isNewChat
+    ? `🔔 <b>New Chat</b>\n\n👤 User: ${userName}\nID: <code>${chatId}</code>\nSource: ${chat.source}\n\nMessage: "${message}"\n\nUse /open ${chatId} to take over`
+    : `💬 <b>New Message</b>\n\n👤 ${userName}\nID: <code>${chatId}</code>\n\n"${message}"`;
+
+  // Send to all registered agents
+  for (const agentId of registeredAgents) {
+    await tgSend(supportBotUrl, agentId, notification);
+  }
+  
+  console.log(`📢 Notified ${registeredAgents.size} agents about chat ${chatId}`);
 }
 
 // Helper to store message in chat history (in-memory only)
@@ -255,11 +277,14 @@ app.post("/telegram/support/webhook", async (req, res) => {
 
     // 1. Register agent
     if (text === "/start") {
+      registeredAgents.add(telegramId);
+      console.log(`✅ Agent ${agentName} (${telegramId}) registered. Total agents: ${registeredAgents.size}`);
 
       await tgSend(
         supportBotUrl,
         telegramId,
         "👋 Welcome, support agent!\n\n" +
+        "You'll receive notifications for new chats.\n\n" +
         "Commands:\n" +
         "/list - View active chats\n" +
         "/open <chat_id> - Open a chat\n" +
@@ -329,15 +354,22 @@ app.post("/telegram/support/webhook", async (req, res) => {
 
   // ---------- NEW PART: SEND CHAT HISTORY ----------
   if (chat) {
+    const userName = chat.userFirstName 
+      ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+      : 'Anonymous';
+    const sourceIcon = chat.source === "web" ? "🌐" : "📱";
+    
+    await tgSend(supportBotUrl, telegramId, `✅ Chat opened: <code>${chatId}</code>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}`);
+    
     if (chat.messages.length === 0) {
       await tgSend(supportBotUrl, telegramId, "📭 Chat is empty. No messages yet.");
     } else {
-      await tgSend(supportBotUrl, telegramId, `📜 Chat history for <code>${chatId}</code>:`);
+      await tgSend(supportBotUrl, telegramId, `📜 Chat history (last 30 messages):`);
 
       for (const msg of chat.messages.slice(-30)) {  // last 30 messages
         const author =
           msg.from === "user" ? "🧑 User" :
-          msg.from === "agent" ? "👨‍💼 Agent" :
+          msg.from === "agent" ? `👨‍💼 ${msg.agentName || 'Agent'}` :
           msg.from === "bot" ? "🤖 Bot" :
           "⚙️ System";
 
@@ -347,7 +379,11 @@ app.post("/telegram/support/webhook", async (req, res) => {
           `${author}:\n${msg.text}`
         );
       }
+      
+      await tgSend(supportBotUrl, telegramId, "✏️ Type your message to reply to the user.");
     }
+  } else {
+    await tgSend(supportBotUrl, telegramId, `❌ Chat <code>${chatId}</code> not found.`);
   }
   // --------------------------------------------------
 
@@ -400,12 +436,16 @@ app.post("/telegram/support/webhook", async (req, res) => {
       };
       storeMessage(currentChat, agentMessage);
 
-      // Send to customer via customer bot
-      if (chat.telegramUserId) {
+      // Send to customer based on source
+      if (chat.source === "telegram" && chat.telegramUserId) {
+        // Telegram user - send via customer bot
         await tgSend(customerBotUrl, chat.telegramUserId, text);
+      } else if (chat.source === "web") {
+        // Web user - send via Socket.IO (handled by emitToDashboard below)
+        console.log(`📤 Sending agent message to web user via Socket.IO: ${currentChat}`);
       }
 
-      // Notify dashboard
+      // Notify dashboard (this sends to web users via Socket.IO)
       emitToDashboard("message_from_agent", {
         chatId: currentChat,
         message: text,
@@ -413,7 +453,7 @@ app.post("/telegram/support/webhook", async (req, res) => {
         agentName
       });
 
-      console.log(`👨‍💼 Agent ${agentName} sent message to ${currentChat}`);
+      console.log(`👨‍💼 Agent ${agentName} sent message to ${currentChat} (${chat.source})`);
       return res.sendStatus(200);
     }
 
@@ -648,7 +688,9 @@ io.on("connection", (socket) => {
   }) => {
     console.log(`📨 Web user message from ${chatId}: ${text}`);
 
-    if (!activeChats.has(chatId)) {
+    const isNewChat = !activeChats.has(chatId);
+    
+    if (isNewChat) {
       // Create new chat for web user
       activeChats.set(chatId, {
         mode: "bot",
@@ -667,6 +709,9 @@ io.on("connection", (socket) => {
         userFirstName,
         userLastName
       });
+      
+      // Notify all agents about new web chat
+      await notifyAgents(chatId, text, true);
     } else {
       const chat = activeChats.get(chatId)!;
       if (userFirstName) chat.userFirstName = userFirstName;
@@ -689,7 +734,9 @@ io.on("connection", (socket) => {
       from: chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : undefined
     });
 
-    if (chat.mode === "human") {
+    // If in human mode, notify the agent about new message
+    if (chat.mode === "human" && !isNewChat) {
+      await notifyAgents(chatId, text, false);
       return;
     }
 
