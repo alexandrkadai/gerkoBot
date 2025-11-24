@@ -290,53 +290,68 @@ app.post("/telegram/support/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 3. Open chat (takeover)
-    if (text.startsWith("/open")) {
-      const parts = text.split(" ");
-      const chatId = parts[1];
+    // 3. Open chat (takeover)if (text.startsWith("/open")) {
+  const parts = text.split(" ");
+  const chatId = parts[1];
 
-      if (!chatId) {
-        await tgSend(supportBotUrl, telegramId, "Usage: /open <chat_id>");
-        return res.sendStatus(200);
+  if (!chatId) {
+    await tgSend(supportBotUrl, telegramId, "Usage: /open <chat_id>");
+    return res.sendStatus(200);
+  }
+
+  // Save active chat for agent
+  agentChatMap.set(telegramId, chatId);
+
+  const chat = activeChats.get(chatId);
+
+  if (chat) {
+    chat.mode = "human";
+    chat.agentId = String(telegramId);
+    chat.agentName = agentName;
+    chat.requestingHuman = false;
+
+    // Add system message
+    const systemMessage: Message = {
+      from: "system",
+      text: `${agentName} connected`,
+      timestamp: Date.now()
+    };
+    storeMessage(chatId, systemMessage);
+  }
+
+  // Notify dashboard
+  emitToDashboard("chat_mode_changed", {
+    chatId,
+    mode: "human",
+    agentId: String(telegramId),
+    agentName
+  });
+
+  // ---------- NEW PART: SEND CHAT HISTORY ----------
+  if (chat) {
+    if (chat.messages.length === 0) {
+      await tgSend(supportBotUrl, telegramId, "📭 Chat is empty. No messages yet.");
+    } else {
+      await tgSend(supportBotUrl, telegramId, `📜 Chat history for <code>${chatId}</code>:`);
+
+      for (const msg of chat.messages.slice(-30)) {  // last 30 messages
+        const author =
+          msg.from === "user" ? "🧑 User" :
+          msg.from === "agent" ? "👨‍💼 Agent" :
+          msg.from === "bot" ? "🤖 Bot" :
+          "⚙️ System";
+
+        await tgSend(
+          supportBotUrl,
+          telegramId,
+          `${author}:\n${msg.text}`
+        );
       }
-
-      // Save active chat for agent
-      agentChatMap.set(telegramId, chatId);
-
-      // Update chat state to human mode
-      const chat = activeChats.get(chatId);
-      if (chat) {
-        chat.mode = "human";
-        chat.agentId = String(telegramId);
-        chat.agentName = agentName;
-        chat.requestingHuman = false;
-
-        // Add system message
-        const systemMessage: Message = {
-          from: "system",
-          text: `${agentName} connected`,
-          timestamp: Date.now()
-        };
-        storeMessage(chatId, systemMessage);
-      }
-
-      // Notify dashboard
-      emitToDashboard("chat_mode_changed", {
-        chatId,
-        mode: "human",
-        agentId: String(telegramId),
-        agentName
-      });
-
-      await tgSend(
-        supportBotUrl,
-        telegramId,
-        `✅ Opened chat <code>${chatId}</code>\nYou're now in human mode. Send messages normally.`
-      );
-      console.log(`🔧 Agent ${agentName} took over chat ${chatId} via Telegram`);
-      return res.sendStatus(200);
     }
+  }
+  // --------------------------------------------------
 
+ 
     // 4. Release chat
     if (text === "/release") {
       const currentChat = agentChatMap.get(telegramId);
@@ -829,3 +844,4 @@ process.on('SIGTERM', () => {
     process.exit(0);
   });
 });
+
