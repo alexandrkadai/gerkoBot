@@ -335,7 +335,7 @@ app.post("/telegram/support/webhook", async (req, res) => {
     chat.agentName = agentName;
     chat.requestingHuman = false;
 
-    // Add system message
+    // Add system message (stored but not emitted to prevent showing to web user)
     const systemMessage: Message = {
       from: "system",
       text: `${agentName} connected`,
@@ -344,7 +344,7 @@ app.post("/telegram/support/webhook", async (req, res) => {
     storeMessage(chatId, systemMessage);
   }
 
-  // Notify dashboard
+  // Notify dashboard about mode change (without system message)
   emitToDashboard("chat_mode_changed", {
     chatId,
     mode: "human",
@@ -400,6 +400,14 @@ app.post("/telegram/support/webhook", async (req, res) => {
 
       const chat = activeChats.get(currentChat);
       if (chat) {
+        // Store system message about agent leaving
+        const systemMessage: Message = {
+          from: "system",
+          text: `${agentName} disconnected`,
+          timestamp: Date.now()
+        };
+        storeMessage(currentChat, systemMessage);
+        
         chat.mode = "bot";
         delete chat.agentId;
         delete chat.agentName;
@@ -734,9 +742,15 @@ io.on("connection", (socket) => {
       from: chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : undefined
     });
 
-    // If in human mode, notify the agent about new message
-    if (chat.mode === "human" && !isNewChat) {
-      await notifyAgents(chatId, text, false);
+    // If in human mode, send message directly to the agent handling this chat
+    if (chat.mode === "human" && chat.agentId && !isNewChat) {
+      const agentTelegramId = parseInt(chat.agentId);
+      if (!isNaN(agentTelegramId)) {
+        const userName = chat.userFirstName 
+          ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+          : 'User';
+        await tgSend(supportBotUrl, agentTelegramId, `💬 ${userName}:\n${text}`);
+      }
       return;
     }
 
@@ -823,6 +837,7 @@ io.on("connection", (socket) => {
       chat.agentName = agentName;
       chat.requestingHuman = false;
       
+      // Store system message but don't emit to prevent showing to web user
       if (previousMode === "bot" && agentName) {
         const systemMessage: Message = {
           from: "system",
@@ -833,6 +848,7 @@ io.on("connection", (socket) => {
       }
     }
     
+    // Only emit mode change, not the system message
     emitToDashboard("chat_mode_changed", { 
       chatId: String(chatId), 
       mode: "human", 
@@ -845,6 +861,18 @@ io.on("connection", (socket) => {
   socket.on("release", async ({ chatId }) => {
     const chat = activeChats.get(String(chatId));
     if (chat) {
+      const agentName = chat.agentName;
+      
+      // Store system message about agent leaving
+      if (agentName) {
+        const systemMessage: Message = {
+          from: "system",
+          text: `${agentName} disconnected`,
+          timestamp: Date.now()
+        };
+        storeMessage(String(chatId), systemMessage, chat.userId);
+      }
+      
       chat.mode = "bot";
       delete chat.agentId;
       delete chat.agentName;
