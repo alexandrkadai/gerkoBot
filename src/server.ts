@@ -106,9 +106,12 @@ async function uploadFileToSupabase(base64Data: string, fileName: string, fileTy
     const uniqueFileName = `${timestamp}_${sanitizedName}`;
     const filePath = `${chatId}/${uniqueFileName}`
     // Upload to Supabase Storage
-    const { data, error } = await supabase.storage
-      .from('Chat_Files_Storage')
-      .upload(filePath, uniqueFileName);
+   const { data, error } = await supabase.storage
+  .from('Chat_Files_Storage')
+  .upload(filePath, buffer, {
+    contentType: fileType,
+    upsert: false,
+  });
     
     if (error) {
       console.error('❌ Supabase upload error:', error);
@@ -116,12 +119,13 @@ async function uploadFileToSupabase(base64Data: string, fileName: string, fileTy
     }
     
     // Get public URL
-    const { data: { publicUrl } } = supabase.storage
-      .from('Chat_Files_Storage')
-      .getPublicUrl(uniqueFileName);
+   const { data: publicData } = supabase.storage
+  .from('Chat_Files_Storage')
+  .getPublicUrl(filePath);
+
     
-    console.log(`✅ File uploaded to Supabase: ${publicUrl}`);
-    return publicUrl;
+    console.log(`✅ File uploaded to Supabase: ${publicData.publicUrl}`);
+    return publicData.publicUrl;
   } catch (error) {
     console.error('❌ Error uploading to Supabase:', error);
     return null;
@@ -345,6 +349,15 @@ app.post("/webhook", async (req, res) => {
       fileType
     };
     storeMessage(chatId, userMessage, String(telegramUserId));
+    // Notify agents if the message looks like a request for help
+if (
+  text.toLowerCase().includes("help") ||
+  text.toLowerCase().includes("support") ||
+  text.toLowerCase().includes("agent") ||
+  chatState.requestingHuman
+) {
+  notifyAgents(chatId, text, false);
+}
 
     // 3. Forward to dashboard
     emitToDashboard("message_from_user", {
