@@ -2,12 +2,16 @@ import express from "express";
 import bodyParser from "body-parser";
 import axios from "axios";
 import dotenv from "dotenv";
+import http from "http";
+import { Server as IOServer } from "socket.io";
+import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import { getAutoReply } from "./getAutoReplies.js";
 
 dotenv.config();
 
 const PORT = process.env.PORT || 3001;
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:8080";
 const WEBHOOK_URL = process.env.BACKEND_URL || "https://gerkobot.onrender.com";
 
 // Load Telegram tokens
@@ -26,8 +30,17 @@ console.log("💬 Using Telegram-only storage (no database)");
 console.log("📦 Supabase Storage initialized for file uploads");
 
 const app = express();
+app.use(cors({ origin: FRONTEND_ORIGIN }));
 app.use(express.json());
 app.use(bodyParser.json());
+
+const server = http.createServer(app);
+const io = new IOServer(server, {
+  cors: {
+    origin: FRONTEND_ORIGIN,
+    methods: ["GET", "POST"]
+  }
+});
 
 // =====================================================
 // TYPES & STATE
@@ -126,6 +139,11 @@ async function uploadFileToSupabase(base64Data: string, fileName: string, fileTy
 // Message storage is now in-memory only via activeChats Map
 // All messages are stored in the ChatState.messages array
 
+// Helper to emit chat event to dashboard
+function emitToDashboard(event: string, payload: any) {
+  io.emit(event, payload);
+}
+
 // Helper to notify all registered agents about new/updated chats
 async function notifyAgents(chatId: string, message: string, isNewChat: boolean = false) {
   const chat = activeChats.get(chatId);
@@ -174,6 +192,7 @@ async function sendBotMessage(chatId: string, text: string, source: "web" | "tel
   };
   
   storeMessage(chatId, message, chat?.userId);
+  emitToDashboard("bot_message", { chatId, text });
   
   console.log(`🤖 Bot sent message to ${chatId}: ${text}`);
 }
@@ -189,6 +208,7 @@ async function handleBotReply(chatId: string, text: string, source: "web" | "tel
   if (normalized === "agent" || normalized.includes("talk to human") || 
       normalized.includes("speak to human") || normalized.includes("human support")) {
     chat.requestingHuman = true;
+    emitToDashboard("human_support_requested", { chatId });
     await sendBotMessage(chatId, "🙋 I've notified our support team. An agent will join you shortly.", source);
     
     // Immediately notify all agents
@@ -306,6 +326,14 @@ app.post("/webhook", async (req, res) => {
       });
       
       console.log(`✨ New Telegram chat created: ${chatId} for user ${from}`);
+      
+      // Notify dashboard about new chat
+      emitToDashboard("chat_mode_changed", {
+        chatId,
+        mode: "bot",
+        userFirstName: firstName,
+        userLastName: lastName
+      });
     } else {
       // Update user info if changed
       const chat = activeChats.get(chatId)!;
@@ -325,16 +353,26 @@ app.post("/webhook", async (req, res) => {
       fileType
     };
     storeMessage(chatId, userMessage, String(telegramUserId));
-    
-    // Instant notification to agents for help requests
-    if (
-      text.toLowerCase().includes("help") ||
-      text.toLowerCase().includes("support") ||
-      text.toLowerCase().includes("agent") ||
-      chatState.requestingHuman
-    ) {
-      await notifyAgents(chatId, text, false);
-    }
+    // Notify agents if the message looks like a request for help
+if (
+  text.toLowerCase().includes("help") ||
+  text.toLowerCase().includes("support") ||
+  text.toLowerCase().includes("agent") ||
+  chatState.requestingHuman
+) {
+  notifyAgents(chatId, text, false);
+}
+
+    // 3. Forward to dashboard
+    emitToDashboard("message_from_user", {
+      chatId,
+      text: text || (fileUrl ? `📎 ${fileName}` : ""),
+      from,
+      fileUrl,
+      fileName,
+      fileType,
+      raw: message
+    });
 
     // 4. If in human mode, forward to support agent via support bot
     if (chatState.mode === "human" && chatState.agentId) {
@@ -419,6 +457,13 @@ app.post("/telegram/support/webhook", async (req, res) => {
           };
           storeMessage(chatId, systemMessage);
         }
+
+        emitToDashboard("chat_mode_changed", {
+          chatId,
+          mode: "human",
+          agentId: String(telegramId),
+          agentName
+        });
 
         if (chat) {
           const userName = chat.userFirstName 
@@ -571,6 +616,14 @@ app.post("/telegram/support/webhook", async (req, res) => {
         storeMessage(chatId, systemMessage);
       }
 
+      // Notify dashboard about mode change (without system message)
+      emitToDashboard("chat_mode_changed", {
+        chatId,
+        mode: "human",
+        agentId: String(telegramId),
+        agentName
+      });
+
       // ---------- NEW PART: SEND CHAT HISTORY ----------
       if (chat) {
         const userName = chat.userFirstName 
@@ -633,6 +686,11 @@ app.post("/telegram/support/webhook", async (req, res) => {
         delete chat.agentName;
         chat.requestingHuman = false;
       }
+
+      emitToDashboard("chat_mode_changed", {
+        chatId: currentChat,
+        mode: "bot"
+      });
 
       await tgSend(supportBotUrl, telegramId, `🔓 Released chat <code>${currentChat}</code>`);
       console.log(`🔓 Chat ${currentChat} released by agent ${agentName}`);
@@ -697,8 +755,9 @@ app.post("/telegram/support/webhook", async (req, res) => {
       };
       storeMessage(currentChat, agentMessage);
 
-      // Send to customer (only Telegram users now)
+      // Send to customer based on source
       if (chat.source === "telegram" && chat.telegramUserId) {
+        // Telegram user - forward file or text
         if (fileUrl) {
           if (fileType.startsWith("image/")) {
             await axios.post(`${customerBotUrl}/sendPhoto`, {
@@ -718,7 +777,21 @@ app.post("/telegram/support/webhook", async (req, res) => {
         } else {
           await tgSend(customerBotUrl, chat.telegramUserId, messageText);
         }
+      } else if (chat.source === "web") {
+        // Web user - send via Socket.IO (handled by emitToDashboard below)
+        console.log(`📤 Sending agent message to web user via Socket.IO: ${currentChat}`);
       }
+
+      // Notify dashboard (this sends to web users via Socket.IO)
+      emitToDashboard("message_from_agent", {
+        chatId: currentChat,
+        message: messageText || (fileUrl ? `📎 ${fileName}` : ""),
+        agentId: String(telegramId),
+        agentName,
+        fileUrl,
+        fileName,
+        fileType
+      });
 
       console.log(`👨‍💼 Agent ${agentName} sent ${fileUrl ? 'file' : 'text'} to ${currentChat} (${chat.source})`);
       return res.sendStatus(200);
@@ -734,20 +807,589 @@ app.post("/telegram/support/webhook", async (req, res) => {
 });
 
 // =====================================================
-// HTTP ENDPOINTS
+// HTTP ENDPOINTS FOR DASHBOARD
 // =====================================================
 
 // Simple health route
 app.get("/health", (req, res) => res.json({ ok: true }));
 
+// Send message to user (agent message)
+app.post("/send", async (req, res) => {
+  const { chatId, message, agentId, agentName } = req.body;
+  if (!chatId || !message) {
+    return res.status(400).json({ error: "Missing chatId or message" });
+  }
+
+  const chat = activeChats.get(chatId);
+
+  try {
+    // Send via customer Telegram bot if it's a Telegram chat
+    if (chat?.source === "telegram" && chat.telegramUserId) {
+      await tgSend(customerBotUrl, chat.telegramUserId, message);
+    }
+    
+    // Store and emit agent message
+    const agentMessage: Message = {
+      from: "agent",
+      text: message,
+      timestamp: Date.now(),
+      agentId,
+      agentName
+    };
+    storeMessage(chatId, agentMessage);
+    
+    emitToDashboard("message_from_agent", { chatId, message, agentId, agentName });
+    console.log(`👨‍💼 Agent ${agentName || agentId} sent message to ${chatId}`);
+    
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Failed to send message:", err);
+    return res.status(500).json({ error: "Failed to send message" });
+  }
+});
+
+// Takeover chat: switch chat to human mode
+app.post("/takeover", async (req, res) => {
+  const { chatId, agentId, agentName } = req.body;
+  if (!chatId || !agentId) {
+    return res.status(400).json({ error: "Missing chatId or agentId" });
+  }
+
+  const chat = activeChats.get(String(chatId));
+  
+  if (chat) {
+    const previousMode = chat.mode;
+    chat.mode = "human";
+    chat.agentId = agentId;
+    chat.agentName = agentName;
+    chat.requestingHuman = false;
+    
+    if (previousMode === "bot" && agentName) {
+      const systemMessage: Message = {
+        from: "system",
+        text: `${agentName} connected`,
+        timestamp: Date.now()
+      };
+      storeMessage(String(chatId), systemMessage, chat.userId);
+    }
+  }
+  
+  emitToDashboard("chat_mode_changed", { 
+    chatId: String(chatId), 
+    mode: "human", 
+    agentId,
+    agentName
+  });
+  
+  console.log(`🔧 Agent ${agentName || agentId} took over chat ${chatId}`);
+  return res.json({ ok: true });
+});
+
+// Release chat: return to bot mode
+app.post("/release", async (req, res) => {
+  const { chatId } = req.body;
+  if (!chatId) {
+    return res.status(400).json({ error: "Missing chatId" });
+  }
+
+  const chat = activeChats.get(String(chatId));
+  if (chat) {
+    chat.mode = "bot";
+    delete chat.agentId;
+    delete chat.agentName;
+    chat.requestingHuman = false;
+  }
+  
+  emitToDashboard("chat_mode_changed", { 
+    chatId: String(chatId), 
+    mode: "bot" 
+  });
+  
+  console.log(`🔓 Chat ${chatId} released back to bot`);
+  return res.json({ ok: true });
+});
+
+// Get or create chat session (in-memory only)
+app.post("/api/chat/session", async (req, res) => {
+  const { chatId, userId } = req.body;
+  
+  if (!chatId || !userId) {
+    return res.status(400).json({ error: "Missing chatId or userId" });
+  }
+
+  try {
+    let chat = activeChats.get(chatId);
+    let created = false;
+    
+    if (!chat) {
+      // Create new chat session in memory
+      activeChats.set(chatId, {
+        mode: "bot",
+        messages: [],
+        source: "web",
+        userId: userId,
+        requestingHuman: false,
+        createdAt: Date.now(),
+        lastActivityAt: Date.now()
+      });
+      created = true;
+      console.log(`✨ New web chat session created: ${chatId}`);
+    }
+    
+    chat = activeChats.get(chatId)!;
+    
+    return res.json({ 
+      session: {
+        id: chatId,
+        user_id: userId,
+        mode: chat.mode,
+        requesting_human: chat.requestingHuman,
+        source: chat.source
+      }, 
+      created 
+    });
+  } catch (error: any) {
+    console.error("Failed to create/get chat session:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// Load chat history (from memory)
+app.get("/api/chat/history/:chatId", async (req, res) => {
+  const { chatId } = req.params;
+
+  try {
+    const chat = activeChats.get(chatId);
+    const messages = chat?.messages || [];
+    return res.json({ messages });
+  } catch (error: any) {
+    console.error("Failed to load chat history:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// Get user's chat sessions (from memory)
+app.get("/api/chat/sessions/:userId", async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const sessions: any[] = [];
+    
+    for (const [chatId, chat] of activeChats.entries()) {
+      if (chat.userId === userId) {
+        const lastMessage = chat.messages.length > 0 
+          ? chat.messages[chat.messages.length - 1] 
+          : null;
+        
+        sessions.push({
+          id: chatId,
+          mode: chat.mode,
+          source: chat.source,
+          lastMessage: lastMessage?.text || 'No messages yet',
+          messageCount: chat.messages.length
+        });
+      }
+    }
+
+    return res.json({ sessions });
+  } catch (error: any) {
+    console.error("Failed to load chat sessions:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================================================
+// SOCKET.IO CONNECTIONS
+// =====================================================
+io.on("connection", (socket) => {
+  console.log("✅ Client connected", socket.id);
+
+  // Send current activeChats snapshot
+  const snapshot = Array.from(activeChats.entries()).map(([chatId, state]) => ({
+    chatId,
+    mode: state.mode,
+    agentId: state.agentId,
+    agentName: state.agentName,
+    messages: state.messages,
+    source: state.source,
+    requestingHuman: state.requestingHuman,
+    userFirstName: state.userFirstName,
+    userLastName: state.userLastName
+  }));
+  
+  socket.emit("active_chats_snapshot", snapshot);
+  console.log(`📸 Sent snapshot of ${snapshot.length} chats`);
+
+  // Handle WEB USER MESSAGES
+  socket.on("user_message", async ({ 
+    chatId, 
+    message,
+    text,
+    firstName, 
+    userFirstName,
+    lastName,
+    userLastName, 
+    userId,
+    fileUrl,
+    fileName,
+    fileType
+  }: { 
+    chatId: string; 
+    message?: string;
+    text?: string;
+    firstName?: string;
+    userFirstName?: string; 
+    lastName?: string;
+    userLastName?: string;
+    userId?: string;
+    fileUrl?: string;
+    fileName?: string;
+    fileType?: string;
+  }) => {
+    const messageText = message || text || "";
+    const fName = firstName || userFirstName;
+    const lName = lastName || userLastName;
+    
+    console.log(`📨 Web user message from ${chatId}: ${messageText}${fileUrl ? ` [+ file: ${fileName}]` : ""}`);
+
+    const isNewChat = !activeChats.has(chatId);
+    
+    if (isNewChat) {
+      // Create new chat for web user
+      activeChats.set(chatId, {
+        mode: "bot",
+        messages: [],
+        source: "web",
+        userFirstName: fName,
+        userLastName: lName,
+        userId,
+        createdAt: Date.now(),
+        lastActivityAt: Date.now()
+      });
+      
+      console.log(`✨ New web chat created: ${chatId} for user ${fName} ${lName}`);
+      
+      emitToDashboard("chat_mode_changed", {
+        chatId,
+        mode: "bot",
+        userFirstName: fName,
+        userLastName: lName
+      });
+      
+      // Notify all agents about new web chat
+      await notifyAgents(chatId, messageText, true);
+    } else {
+      const chat = activeChats.get(chatId)!;
+      if (fName) chat.userFirstName = fName;
+      if (lName) chat.userLastName = lName;
+      if (userId) chat.userId = userId;
+    }
+
+    const chat = activeChats.get(chatId)!;
+
+    const userMessage: Message = {
+      from: "user",
+      text: messageText || (fileUrl ? `📎 ${fileName}` : ""),
+      timestamp: Date.now(),
+      fileUrl,
+      fileName,
+      fileType
+    };
+    storeMessage(chatId, userMessage, userId);
+
+    emitToDashboard("message_from_user", { 
+      chatId, 
+      text: messageText,
+      from: chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : undefined,
+      fileUrl,
+      fileName,
+      fileType
+    });
+
+    // If in human mode, send message directly to the agent handling this chat
+    if (chat.mode === "human" && chat.agentId) {
+      const agentTelegramId = parseInt(chat.agentId);
+      if (!isNaN(agentTelegramId)) {
+        const senderName = chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : "User";
+        
+        if (fileUrl) {
+          let finalFileUrl = fileUrl;
+          
+          // Check if it's a base64 file - upload to Supabase first
+          if (fileUrl.startsWith('data:')) {
+            console.log(`📤 Uploading base64 file to Supabase: ${fileName}`);
+            const uploadedUrl = await uploadFileToSupabase(fileUrl, fileName || 'file', fileType || 'application/octet-stream', chatId);
+            
+            if (uploadedUrl) {
+              finalFileUrl = uploadedUrl;
+              console.log(`✅ File uploaded successfully, public URL: ${uploadedUrl}`);
+            } else {
+              // Upload failed - notify both agent and user
+              await tgSend(
+                supportBotUrl,
+                agentTelegramId,
+                `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}\n\n📎 User attempted to send file: <code>${fileName}</code>\n❌ File upload failed`
+              );
+              
+              // Send error message to web user
+              const errorMessage: Message = {
+                from: "system",
+                text: `❌ Sorry, your file "${fileName}" failed to upload. Please try again or contact support if the problem persists.`,
+                timestamp: Date.now()
+              };
+              storeMessage(chatId, errorMessage, userId);
+              emitToDashboard("message_from_bot", { 
+                chatId, 
+                text: errorMessage.text 
+              });
+              
+              console.error(`❌ Failed to upload file to Supabase for chat ${chatId}`);
+              return;
+            }
+          }
+          
+          // Send file to agent via Telegram (now with public URL)
+          if (fileType?.startsWith("image/")) {
+            await axios.post(`${supportBotUrl}/sendPhoto`, {
+              chat_id: agentTelegramId,
+              photo: finalFileUrl,
+              caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
+              parse_mode: "HTML"
+            });
+          } else {
+            await axios.post(`${supportBotUrl}/sendDocument`, {
+              chat_id: agentTelegramId,
+              document: finalFileUrl,
+              caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
+              parse_mode: "HTML"
+            });
+          }
+          
+          console.log(`✅ Sent file to agent: ${finalFileUrl}`);
+        } else {
+          await tgSend(
+            supportBotUrl,
+            agentTelegramId,
+            `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`
+          );
+        }
+        console.log(`🔀 Forwarded web message with ${fileUrl ? 'file' : 'text'} to agent ${chat.agentName}`);
+      }
+      return;
+    }
+
+    // 5. Bot auto-reply (only if not in human mode)
+    if (messageText || !fileUrl) {
+      await handleBotReply(chatId, messageText, "web");
+    } else {
+      // If only file, send acknowledgment
+      const botResponse = "Thank you for sending that file! How can I help you today?";
+      const botMessage: Message = {
+        from: "bot",
+        text: botResponse,
+        timestamp: Date.now()
+      };
+      storeMessage(chatId, botMessage, userId);
+      emitToDashboard("message_from_bot", { chatId, text: botResponse });
+    }
+  });
+
+  // Handle user info updates
+  socket.on("user_info", ({ chatId, firstName, lastName, userId }: { 
+    chatId: string; 
+    firstName?: string; 
+    lastName?: string;
+    userId?: string;
+  }) => {
+    const chat = activeChats.get(chatId);
+    if (chat) {
+      if (firstName) chat.userFirstName = firstName;
+      if (lastName) chat.userLastName = lastName;
+      if (userId) chat.userId = userId;
+      
+      emitToDashboard("chat_mode_changed", {
+        chatId,
+        mode: chat.mode,
+        agentId: chat.agentId,
+        agentName: chat.agentName,
+        userFirstName: chat.userFirstName,
+        userLastName: chat.userLastName,
+        requestingHuman: chat.requestingHuman
+      });
+    }
+  });
+
+  // Handle human support request
+  socket.on("request_human_support", async ({ chatId }: { chatId: string }) => {
+    const chat = activeChats.get(chatId);
+    if (chat) {
+      chat.requestingHuman = true;
+      emitToDashboard("human_support_requested", { chatId });
+      sendBotMessage(chatId, "🙋 I've notified our support team. An agent will join you shortly.", chat.source);
+      
+      // Send immediate notification to all agents with inline button
+      const userName = chat.userFirstName 
+        ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+        : 'Anonymous';
+      const sourceIcon = chat.source === "web" ? "🌐" : "📱";
+      
+      for (const agentId of registeredAgents) {
+        try {
+          await axios.post(`${supportBotUrl}/sendMessage`, {
+            chat_id: agentId,
+            text: `🙋 <b>SUPPORT REQUESTED!</b>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nID: <code>${chatId}</code>\n\nUser needs help!`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "📖 Open Chat", callback_data: `open_${chatId}` }
+                ]
+              ]
+            }
+          });
+        } catch (error) {
+          console.error(`Failed to notify agent ${agentId}:`, error);
+        }
+      }
+      
+      console.log(`🙋 Human support requested via button for chat ${chatId} - notified ${registeredAgents.size} agents`);
+    }
+  });
+
+  socket.on("request_human", async ({ chatId }: { chatId: string }) => {
+    const chat = activeChats.get(chatId);
+    if (chat) {
+      chat.requestingHuman = true;
+      emitToDashboard("human_support_requested", { chatId });
+      sendBotMessage(chatId, "🙋 I've notified our support team. An agent will join you shortly.", chat.source);
+      
+      // Send immediate notification to all agents with inline button
+      const userName = chat.userFirstName 
+        ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+        : 'Anonymous';
+      const sourceIcon = chat.source === "web" ? "🌐" : "📱";
+      
+      for (const agentId of registeredAgents) {
+        try {
+          await axios.post(`${supportBotUrl}/sendMessage`, {
+            chat_id: agentId,
+            text: `🙋 <b>SUPPORT REQUESTED!</b>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nID: <code>${chatId}</code>\n\nUser needs help!`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "📖 Open Chat", callback_data: `open_${chatId}` }
+                ]
+              ]
+            }
+          });
+        } catch (error) {
+          console.error(`Failed to notify agent ${agentId}:`, error);
+        }
+      }
+      
+      console.log(`🙋 Human support requested for chat ${chatId} - notified ${registeredAgents.size} agents`);
+    }
+  });
+
+  // Dashboard sends message
+  socket.on("send_message", async ({ chatId, message, agentId, agentName }) => {
+    const chat = activeChats.get(String(chatId));
+    
+    try {
+      if (chat?.source === "telegram" && chat.telegramUserId) {
+        await tgSend(customerBotUrl, chat.telegramUserId, message);
+      }
+      
+      const agentMessage: Message = {
+        from: "agent",
+        text: message,
+        timestamp: Date.now(),
+        agentId,
+        agentName
+      };
+      storeMessage(String(chatId), agentMessage, chat?.userId);
+      
+      emitToDashboard("message_from_agent", { chatId, message, agentId, agentName });
+    } catch (err) {
+      console.error("Failed to send via socket", err);
+      socket.emit("error", { message: "send_failed" });
+    }
+  });
+
+  // Takeover via socket
+  socket.on("takeover", async ({ chatId, agentId, agentName }) => {
+    const chat = activeChats.get(String(chatId));
+    
+    if (chat) {
+      const previousMode = chat.mode;
+      chat.mode = "human";
+      chat.agentId = agentId;
+      chat.agentName = agentName;
+      chat.requestingHuman = false;
+      
+      // Store system message but don't emit to prevent showing to web user
+      if (previousMode === "bot" && agentName) {
+        const systemMessage: Message = {
+          from: "system",
+          text: `${agentName} connected`,
+          timestamp: Date.now()
+        };
+        storeMessage(String(chatId), systemMessage, chat.userId);
+      }
+    }
+    
+    // Only emit mode change, not the system message
+    emitToDashboard("chat_mode_changed", { 
+      chatId: String(chatId), 
+      mode: "human", 
+      agentId,
+      agentName
+    });
+  });
+
+  // Release via socket
+  socket.on("release", async ({ chatId }) => {
+    const chat = activeChats.get(String(chatId));
+    if (chat) {
+      const agentName = chat.agentName;
+      
+      // Store system message about agent leaving
+      if (agentName) {
+        const systemMessage: Message = {
+          from: "system",
+          text: `${agentName} disconnected`,
+          timestamp: Date.now()
+        };
+        storeMessage(String(chatId), systemMessage, chat.userId);
+      }
+      
+      chat.mode = "bot";
+      delete chat.agentId;
+      delete chat.agentName;
+      chat.requestingHuman = false;
+    }
+    
+    emitToDashboard("chat_mode_changed", { 
+      chatId: String(chatId), 
+      mode: "bot" 
+    });
+  });
+
+  socket.on("disconnect", () => {
+    console.log("❌ Client disconnected", socket.id);
+  });
+});
+
 // =====================================================
 // SERVER STARTUP
 // =====================================================
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`🚀 Server listening on port ${PORT}`);
+  console.log(`🌐 Frontend origin: ${FRONTEND_ORIGIN}`);
   console.log(`📱 Webhook URL: ${WEBHOOK_URL}`);
   console.log(`💬 Two-bot mode: Customer + Support agents via Telegram`);
-  console.log(`⚡ Instant notifications enabled for support requests`);
+  console.log(`🔌 Socket.IO enabled for real-time dashboard`);
   console.log(`\n📋 Customer Bot Webhook: ${WEBHOOK_URL}/webhook`);
   console.log(`📋 Support Bot Webhook: ${WEBHOOK_URL}/telegram/support/webhook`);
 });
@@ -755,11 +1397,17 @@ app.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nReceived SIGINT, shutting down gracefully...');
-  process.exit(0);
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
 });
 
 process.on('SIGTERM', () => {
   console.log('\nReceived SIGTERM, shutting down gracefully...');
-  process.exit(0);
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
 });
 
