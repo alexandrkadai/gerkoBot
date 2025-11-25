@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import http from "http";
 import { Server as IOServer } from "socket.io";
 import cors from "cors";
+import { createClient } from "@supabase/supabase-js";
 import { getAutoReply } from "./getAutoReplies.js";
 
 dotenv.config();
@@ -20,7 +21,13 @@ const TELEGRAM_SUPPORT_TOKEN = process.env.TELEGRAM_BOT_SUPPORT_TOKEN!;
 const customerBotUrl = `https://api.telegram.org/bot${TELEGRAM_CUSTOMER_TOKEN}`;
 const supportBotUrl = `https://api.telegram.org/bot${TELEGRAM_SUPPORT_TOKEN}`;
 
+// Initialize Supabase client
+const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL!;
+const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY!;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
 console.log("💬 Using Telegram-only storage (no database)");
+console.log("📦 Supabase Storage initialized for file uploads");
 
 const app = express();
 app.use(cors({ origin: FRONTEND_ORIGIN }));
@@ -81,6 +88,46 @@ async function tgSend(botUrl: string, chatId: number | string, text: string) {
     });
   } catch (error) {
     console.error(`Failed to send Telegram message to ${chatId}:`, error);
+  }
+}
+
+// Helper to upload base64 file to Supabase Storage and return public URL
+async function uploadFileToSupabase(base64Data: string, fileName: string, fileType: string): Promise<string | null> {
+  try {
+    // Extract base64 content (remove data:image/jpeg;base64, prefix)
+    const base64Content = base64Data.split(',')[1] || base64Data;
+    
+    // Convert base64 to buffer
+    const buffer = Buffer.from(base64Content, 'base64');
+    
+    // Generate unique filename with timestamp
+    const timestamp = Date.now();
+    const sanitizedName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const uniqueFileName = `${timestamp}_${sanitizedName}`;
+    
+    // Upload to Supabase Storage
+    const { data, error } = await supabase.storage
+      .from('Chat_Files_Storage')
+      .upload(uniqueFileName, buffer, {
+        contentType: fileType,
+        upsert: false
+      });
+    
+    if (error) {
+      console.error('❌ Supabase upload error:', error);
+      return null;
+    }
+    
+    // Get public URL
+    const { data: { publicUrl } } = supabase.storage
+      .from('Chat_Files_Storage')
+      .getPublicUrl(uniqueFileName);
+    
+    console.log(`✅ File uploaded to Supabase: ${publicUrl}`);
+    return publicUrl;
+  } catch (error) {
+    console.error('❌ Error uploading to Supabase:', error);
+    return null;
   }
 }
 
@@ -1052,34 +1099,46 @@ io.on("connection", (socket) => {
         const senderName = chat.userFirstName ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim() : "User";
         
         if (fileUrl) {
-          // Check if it's a base64 file or URL
+          let finalFileUrl = fileUrl;
+          
+          // Check if it's a base64 file - upload to Supabase first
           if (fileUrl.startsWith('data:')) {
-            // Base64 file - Telegram API doesn't support base64 directly
-            // For now, just send text notification. TODO: Upload to cloud storage first
-            await tgSend(
-              supportBotUrl,
-              agentTelegramId,
-              `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}\n\n📎 User sent a file: <code>${fileName}</code>\n⚠️ File preview not available (needs cloud storage integration)`
-            );
-            console.log(`⚠️ Base64 file detected - Telegram API needs URL or cloud storage`);
-          } else {
-            // URL-based file - send directly
-            if (fileType?.startsWith("image/")) {
-              await axios.post(`${supportBotUrl}/sendPhoto`, {
-                chat_id: agentTelegramId,
-                photo: fileUrl,
-                caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
-                parse_mode: "HTML"
-              });
+            console.log(`📤 Uploading base64 file to Supabase: ${fileName}`);
+            const uploadedUrl = await uploadFileToSupabase(fileUrl, fileName || 'file', fileType || 'application/octet-stream');
+            
+            if (uploadedUrl) {
+              finalFileUrl = uploadedUrl;
+              console.log(`✅ File uploaded successfully, public URL: ${uploadedUrl}`);
             } else {
-              await axios.post(`${supportBotUrl}/sendDocument`, {
-                chat_id: agentTelegramId,
-                document: fileUrl,
-                caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
-                parse_mode: "HTML"
-              });
+              // Upload failed, send notification only
+              await tgSend(
+                supportBotUrl,
+                agentTelegramId,
+                `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}\n\n📎 User sent a file: <code>${fileName}</code>\n❌ File upload failed, please ask user to resend`
+              );
+              console.error(`❌ Failed to upload file to Supabase`);
+              return;
             }
           }
+          
+          // Send file to agent via Telegram (now with public URL)
+          if (fileType?.startsWith("image/")) {
+            await axios.post(`${supportBotUrl}/sendPhoto`, {
+              chat_id: agentTelegramId,
+              photo: finalFileUrl,
+              caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
+              parse_mode: "HTML"
+            });
+          } else {
+            await axios.post(`${supportBotUrl}/sendDocument`, {
+              chat_id: agentTelegramId,
+              document: finalFileUrl,
+              caption: `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}`,
+              parse_mode: "HTML"
+            });
+          }
+          
+          console.log(`✅ Sent file to agent: ${finalFileUrl}`);
         } else {
           await tgSend(
             supportBotUrl,
