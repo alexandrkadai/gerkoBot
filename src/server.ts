@@ -106,26 +106,30 @@ async function uploadFileToSupabase(base64Data: string, fileName: string, fileTy
     const uniqueFileName = `${timestamp}_${sanitizedName}`;
     const filePath = `${chatId}/${uniqueFileName}`
     // Upload to Supabase Storage
-   const { data, error } = await supabase.storage
-  .from('Chat_Files_Storage')
-  .upload(filePath, buffer, {
-    contentType: fileType,
-    upsert: false,
-  });
+    const { data, error } = await supabase.storage
+      .from('Chat_Files_Storage')
+      .upload(filePath, buffer, {
+        cacheControl: '3600',
+        upsert: false
+      });
     
     if (error) {
       console.error('❌ Supabase upload error:', error);
       return null;
     }
     
-    // Get public URL
-   const { data: publicData } = supabase.storage
-  .from('Chat_Files_Storage')
-  .getPublicUrl(filePath);
-
+    // Create signed URL (expires in 60 seconds)
+    const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+      .from('Chat_Files_Storage')
+      .createSignedUrl(filePath, 60);
     
-    console.log(`✅ File uploaded to Supabase: ${publicData.publicUrl}`);
-    return publicData.publicUrl;
+    if (signedUrlError) {
+      console.error('❌ Error creating signed URL:', signedUrlError);
+      return null;
+    }
+    
+    console.log(`✅ File uploaded to Supabase with signed URL: ${signedUrlData.signedUrl}`);
+    return signedUrlData.signedUrl;
   } catch (error) {
     console.error('❌ Error uploading to Supabase:', error);
     return null;
