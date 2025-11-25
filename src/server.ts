@@ -108,10 +108,7 @@ async function uploadFileToSupabase(base64Data: string, fileName: string, fileTy
     // Upload to Supabase Storage
     const { data, error } = await supabase.storage
       .from('Chat_Files_Storage')
-      .upload(uniqueFileName, buffer, {
-        contentType: fileType,
-        upsert: false
-      });
+      .upload(uniqueFileName, buffer);
     
     if (error) {
       console.error('❌ Supabase upload error:', error);
