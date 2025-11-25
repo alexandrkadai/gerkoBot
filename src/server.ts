@@ -1193,21 +1193,75 @@ io.on("connection", (socket) => {
   });
 
   // Handle human support request
-  socket.on("request_human_support", ({ chatId }: { chatId: string }) => {
+  socket.on("request_human_support", async ({ chatId }: { chatId: string }) => {
     const chat = activeChats.get(chatId);
     if (chat) {
       chat.requestingHuman = true;
       emitToDashboard("human_support_requested", { chatId });
       sendBotMessage(chatId, "🙋 I've notified our support team. An agent will join you shortly.", chat.source);
+      
+      // Send immediate notification to all agents with inline button
+      const userName = chat.userFirstName 
+        ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+        : 'Anonymous';
+      const sourceIcon = chat.source === "web" ? "🌐" : "📱";
+      
+      for (const agentId of registeredAgents) {
+        try {
+          await axios.post(`${supportBotUrl}/sendMessage`, {
+            chat_id: agentId,
+            text: `🙋 <b>SUPPORT REQUESTED!</b>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nID: <code>${chatId}</code>\n\nUser needs help!`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "📖 Open Chat", callback_data: `open_${chatId}` }
+                ]
+              ]
+            }
+          });
+        } catch (error) {
+          console.error(`Failed to notify agent ${agentId}:`, error);
+        }
+      }
+      
+      console.log(`🙋 Human support requested via button for chat ${chatId} - notified ${registeredAgents.size} agents`);
     }
   });
 
-  socket.on("request_human", ({ chatId }: { chatId: string }) => {
+  socket.on("request_human", async ({ chatId }: { chatId: string }) => {
     const chat = activeChats.get(chatId);
     if (chat) {
       chat.requestingHuman = true;
       emitToDashboard("human_support_requested", { chatId });
       sendBotMessage(chatId, "🙋 I've notified our support team. An agent will join you shortly.", chat.source);
+      
+      // Send immediate notification to all agents with inline button
+      const userName = chat.userFirstName 
+        ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
+        : 'Anonymous';
+      const sourceIcon = chat.source === "web" ? "🌐" : "📱";
+      
+      for (const agentId of registeredAgents) {
+        try {
+          await axios.post(`${supportBotUrl}/sendMessage`, {
+            chat_id: agentId,
+            text: `🙋 <b>SUPPORT REQUESTED!</b>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nID: <code>${chatId}</code>\n\nUser needs help!`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "📖 Open Chat", callback_data: `open_${chatId}` }
+                ]
+              ]
+            }
+          });
+        } catch (error) {
+          console.error(`Failed to notify agent ${agentId}:`, error);
+        }
+      }
+      
+      console.log(`🙋 Human support requested for chat ${chatId} - notified ${registeredAgents.size} agents`);
     }
   });
 
