@@ -23,7 +23,7 @@ const supportBotUrl = `https://api.telegram.org/bot${TELEGRAM_SUPPORT_TOKEN}`;
 
 // Initialize Supabase client
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL!;
-const supabaseKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY!;
+const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 console.log("💬 Using Telegram-only storage (no database)");
@@ -1110,13 +1110,26 @@ io.on("connection", (socket) => {
               finalFileUrl = uploadedUrl;
               console.log(`✅ File uploaded successfully, public URL: ${uploadedUrl}`);
             } else {
-              // Upload failed, send notification only
+              // Upload failed - notify both agent and user
               await tgSend(
                 supportBotUrl,
                 agentTelegramId,
-                `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}\n\n📎 User sent a file: <code>${fileName}</code>\n❌ File upload failed, please ask user to resend`
+                `💬 From <b>${senderName}</b> (Chat: <code>${chatId}</code>):\n\n${messageText}\n\n📎 User attempted to send file: <code>${fileName}</code>\n❌ File upload failed`
               );
-              console.error(`❌ Failed to upload file to Supabase`);
+              
+              // Send error message to web user
+              const errorMessage: Message = {
+                from: "system",
+                text: `❌ Sorry, your file "${fileName}" failed to upload. Please try again or contact support if the problem persists.`,
+                timestamp: Date.now()
+              };
+              storeMessage(chatId, errorMessage, userId);
+              emitToDashboard("message_from_bot", { 
+                chatId, 
+                text: errorMessage.text 
+              });
+              
+              console.error(`❌ Failed to upload file to Supabase for chat ${chatId}`);
               return;
             }
           }
