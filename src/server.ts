@@ -92,7 +92,7 @@ async function tgSend(botUrl: string, chatId: number | string, text: string) {
 }
 
 // Helper to upload base64 file to Supabase Storage and return public URL
-async function uploadFileToSupabase(base64Data: string, fileName: string, fileType: string): Promise<string | null> {
+async function uploadFileToSupabase(base64Data: string, fileName: string, fileType: string, chatId: string): Promise<string | null> {
   try {
     // Extract base64 content (remove data:image/jpeg;base64, prefix)
     const base64Content = base64Data.split(',')[1] || base64Data;
@@ -104,11 +104,11 @@ async function uploadFileToSupabase(base64Data: string, fileName: string, fileTy
     const timestamp = Date.now();
     const sanitizedName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
     const uniqueFileName = `${timestamp}_${sanitizedName}`;
-    
+    const filePath = `${chatId}/${uniqueFileName}`
     // Upload to Supabase Storage
     const { data, error } = await supabase.storage
       .from('Chat_Files_Storage')
-      .upload(uniqueFileName, buffer);
+      .upload(filePath, uniqueFileName);
     
     if (error) {
       console.error('❌ Supabase upload error:', error);
@@ -1101,7 +1101,7 @@ io.on("connection", (socket) => {
           // Check if it's a base64 file - upload to Supabase first
           if (fileUrl.startsWith('data:')) {
             console.log(`📤 Uploading base64 file to Supabase: ${fileName}`);
-            const uploadedUrl = await uploadFileToSupabase(fileUrl, fileName || 'file', fileType || 'application/octet-stream');
+            const uploadedUrl = await uploadFileToSupabase(fileUrl, fileName || 'file', fileType || 'application/octet-stream', chatId);
             
             if (uploadedUrl) {
               finalFileUrl = uploadedUrl;
