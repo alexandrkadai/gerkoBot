@@ -69,6 +69,7 @@ interface ChatState {
   telegramUserId?: number; // Telegram user ID for customer bot
   createdAt: number;
   lastActivityAt: number;
+  visited?: boolean; // Track if chat has been opened by an agent
 }
 
 const activeChats = new Map<string, ChatState>();
@@ -449,6 +450,7 @@ app.post("/telegram/support/webhook", async (req, res) => {
           chat.agentId = String(telegramId);
           chat.agentName = agentName;
           chat.requestingHuman = false;
+          chat.visited = true; // Mark chat as visited
 
           const systemMessage: Message = {
             from: "system",
@@ -543,6 +545,7 @@ app.post("/telegram/support/webhook", async (req, res) => {
 
       for (const [chatId, chat] of sortedChats) {
         const requestFlag = chat.requestingHuman ? "🙋 <b>NEEDS HELP</b>" : "";
+        const visitedFlag = chat.visited ? "✅" : "🆕";
         const modeIcon = chat.mode === "human" ? "👤" : "🤖";
         const userName = `${chat.userFirstName || ''} ${chat.userLastName || ''}`.trim() || 'Anonymous';
         const sourceIcon = chat.source === "web" ? "🌐" : "📱";
@@ -558,7 +561,7 @@ app.post("/telegram/support/webhook", async (req, res) => {
         const msgCount = chat.messages.length;
         const agentInfo = chat.mode === "human" && chat.agentName ? `\n   Agent: ${chat.agentName}` : "";
         
-        let msg = `${requestFlag}\n${modeIcon} <b>${userName}</b> ${sourceIcon}\n`;
+        let msg = `${requestFlag}\n${visitedFlag} ${modeIcon} <b>${userName}</b> ${sourceIcon}\n`;
         msg += `   Created: ${createdTime}\n`;
         msg += `   Last activity: ${lastActivityTime}\n`;
         msg += `   Messages: ${msgCount}${agentInfo}\n`;
@@ -606,6 +609,7 @@ app.post("/telegram/support/webhook", async (req, res) => {
         chat.agentId = String(telegramId);
         chat.agentName = agentName;
         chat.requestingHuman = false;
+        chat.visited = true; // Mark chat as visited
 
         // Add system message (stored but not emitted to prevent showing to web user)
         const systemMessage: Message = {
