@@ -1229,7 +1229,28 @@ io.on("connection", (socket) => {
   }) => {
     console.log(`✨ Creating new web chat: ${chatId} for user ${firstName} ${lastName}`);
     
-    // Create new chat session
+    // Check if there's an existing chat with this ID
+    const existingChat = activeChats.get(chatId);
+    if (existingChat) {
+      console.log(`⚠️ Chat ${chatId} already exists. Archiving old chat and creating fresh one.`);
+      
+      // Notify that old chat is being closed
+      emitToDashboard("chat_closed", { chatId });
+      
+      // If chat was in human mode, release it properly
+      if (existingChat.mode === "human" && existingChat.agentId) {
+        const agentTelegramId = parseInt(existingChat.agentId);
+        if (!isNaN(agentTelegramId)) {
+          agentChatMap.delete(agentTelegramId);
+        }
+      }
+      
+      // Delete the old chat
+      activeChats.delete(chatId);
+      console.log(`🗑️ Old chat ${chatId} deleted`);
+    }
+    
+    // Create new fresh chat session
     activeChats.set(chatId, {
       mode: "bot",
       messages: [],
