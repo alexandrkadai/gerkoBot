@@ -1220,6 +1220,47 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Handle new chat creation
+  socket.on("create_new_chat", ({ chatId, firstName, lastName, userId }: { 
+    chatId: string; 
+    firstName?: string; 
+    lastName?: string;
+    userId?: string;
+  }) => {
+    console.log(`✨ Creating new web chat: ${chatId} for user ${firstName} ${lastName}`);
+    
+    // Create new chat session
+    activeChats.set(chatId, {
+      mode: "bot",
+      messages: [],
+      source: "web",
+      userFirstName: firstName,
+      userLastName: lastName,
+      userId,
+      createdAt: Date.now(),
+      lastActivityAt: Date.now()
+    });
+    
+    // Notify dashboard about new chat
+    emitToDashboard("chat_mode_changed", {
+      chatId,
+      mode: "bot",
+      userFirstName: firstName,
+      userLastName: lastName
+    });
+    
+    // Send welcome message
+    const welcomeMessage: Message = {
+      from: "bot",
+      text: "👋 Hello! How can I help you today?",
+      timestamp: Date.now()
+    };
+    storeMessage(chatId, welcomeMessage, userId);
+    emitToDashboard("bot_message", { chatId, text: welcomeMessage.text });
+    
+    console.log(`✅ New chat ${chatId} created successfully`);
+  });
+
   // Handle user info updates
   socket.on("user_info", ({ chatId, firstName, lastName, userId }: { 
     chatId: string; 
@@ -1227,22 +1268,47 @@ io.on("connection", (socket) => {
     lastName?: string;
     userId?: string;
   }) => {
-    const chat = activeChats.get(chatId);
-    if (chat) {
+    let chat = activeChats.get(chatId);
+    
+    // If chat doesn't exist, create it
+    if (!chat) {
+      console.log(`✨ Creating chat ${chatId} via user_info for user ${firstName} ${lastName}`);
+      activeChats.set(chatId, {
+        mode: "bot",
+        messages: [],
+        source: "web",
+        userFirstName: firstName,
+        userLastName: lastName,
+        userId,
+        createdAt: Date.now(),
+        lastActivityAt: Date.now()
+      });
+      chat = activeChats.get(chatId)!;
+      
+      // Send welcome message for new chat
+      const welcomeMessage: Message = {
+        from: "bot",
+        text: "👋 Hello! How can I help you today?",
+        timestamp: Date.now()
+      };
+      storeMessage(chatId, welcomeMessage, userId);
+      emitToDashboard("bot_message", { chatId, text: welcomeMessage.text });
+    } else {
+      // Update existing chat info
       if (firstName) chat.userFirstName = firstName;
       if (lastName) chat.userLastName = lastName;
       if (userId) chat.userId = userId;
-      
-      emitToDashboard("chat_mode_changed", {
-        chatId,
-        mode: chat.mode,
-        agentId: chat.agentId,
-        agentName: chat.agentName,
-        userFirstName: chat.userFirstName,
-        userLastName: chat.userLastName,
-        requestingHuman: chat.requestingHuman
-      });
     }
+    
+    emitToDashboard("chat_mode_changed", {
+      chatId,
+      mode: chat.mode,
+      agentId: chat.agentId,
+      agentName: chat.agentName,
+      userFirstName: chat.userFirstName,
+      userLastName: chat.userLastName,
+      requestingHuman: chat.requestingHuman
+    });
   });
 
   // Handle human support request
