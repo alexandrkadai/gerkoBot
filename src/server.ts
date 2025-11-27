@@ -153,17 +153,32 @@ async function notifyAgents(chatId: string, message: string, isNewChat: boolean 
   const userName = chat.userFirstName 
     ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
     : 'Anonymous';
+  const sourceIcon = chat.source === "web" ? "🌐" : "📱";
 
-  const notification = isNewChat
-    ? `🔔 <b>New Chat</b>\n\n👤 User: ${userName}\nID: <code>${chatId}</code>\nSource: ${chat.source}\n\nMessage: "${message}"\n\nUse /open ${chatId} to take over`
-    : `💬 <b>New Message</b>\n\n👤 ${userName}\nID: <code>${chatId}</code>\n\n"${message}"`;
+  const notificationTitle = isNewChat ? "🔔 <b>NEW CHAT CREATED!</b>" : "💬 <b>New Message</b>";
+  const notificationText = `${notificationTitle}\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nID: <code>${chatId}</code>\n\nMessage: "${message}"\n\nClick button to open chat`;
 
-  // Send to all registered agents
+  // Send to all registered agents with inline button
   for (const agentId of registeredAgents) {
-    await tgSend(supportBotUrl, agentId, notification);
+    try {
+      await axios.post(`${supportBotUrl}/sendMessage`, {
+        chat_id: agentId,
+        text: notificationText,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "📖 Open Chat", callback_data: `open_${chatId}` }
+            ]
+          ]
+        }
+      });
+    } catch (error) {
+      console.error(`Failed to notify agent ${agentId}:`, error);
+    }
   }
   
-  console.log(`📢 Notified ${registeredAgents.size} agents about chat ${chatId}`);
+  console.log(`📢 Notified ${registeredAgents.size} agents about ${isNewChat ? 'new chat' : 'message'} ${chatId}`);
 }
 
 // Helper to store message in chat history (in-memory only)
@@ -335,6 +350,9 @@ app.post("/webhook", async (req, res) => {
         userFirstName: firstName,
         userLastName: lastName
       });
+      
+      // Notify all agents about new Telegram chat
+      await notifyAgents(chatId, text || "[Chat started]", true);
     } else {
       // Update user info if changed
       const chat = activeChats.get(chatId)!;
@@ -354,15 +372,6 @@ app.post("/webhook", async (req, res) => {
       fileType
     };
     storeMessage(chatId, userMessage, String(telegramUserId));
-    // Notify agents if the message looks like a request for help
-if (
-  text.toLowerCase().includes("help") ||
-  text.toLowerCase().includes("support") ||
-  text.toLowerCase().includes("agent") ||
-  chatState.requestingHuman
-) {
-  notifyAgents(chatId, text, false);
-}
 
     // 3. Forward to dashboard
     emitToDashboard("message_from_user", {
