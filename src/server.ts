@@ -300,6 +300,61 @@ app.post("/webhook", async (req, res) => {
 
     console.log(`📨 Telegram customer message from ${from} (${telegramUserId}): ${text}`);
 
+    // Handle /newchat command to start fresh conversation
+    if (text === "/newchat" || text === "/start") {
+      const oldChatId = userChatMap.get(telegramUserId);
+      
+      if (oldChatId && activeChats.has(oldChatId)) {
+        const oldChat = activeChats.get(oldChatId);
+        
+        // Release agent if chat was in human mode
+        if (oldChat && oldChat.mode === "human" && oldChat.agentId) {
+          const agentTelegramId = parseInt(oldChat.agentId);
+          if (!isNaN(agentTelegramId)) {
+            agentChatMap.delete(agentTelegramId);
+            await tgSend(
+              supportBotUrl,
+              agentTelegramId,
+              `ℹ️ Chat <code>${oldChatId}</code> ended by user. They started a new conversation.`
+            );
+          }
+        }
+        
+        // Delete old chat
+        activeChats.delete(oldChatId);
+        emitToDashboard("chat_closed", { chatId: oldChatId });
+        console.log(`🗑️ Old Telegram chat ${oldChatId} deleted for user ${from}`);
+      }
+      
+      // Create new chat
+      const newChatId = `tg_${telegramUserId}_${Date.now()}`;
+      userChatMap.set(telegramUserId, newChatId);
+      
+      activeChats.set(newChatId, {
+        mode: "bot",
+        messages: [],
+        source: "telegram",
+        userFirstName: firstName,
+        userLastName: lastName,
+        userId: String(telegramUserId),
+        telegramUserId: telegramUserId,
+        createdAt: Date.now(),
+        lastActivityAt: Date.now()
+      });
+      
+      await tgSend(customerBotUrl, telegramUserId, "✨ New conversation started! How can I help you today?");
+      
+      emitToDashboard("chat_mode_changed", {
+        chatId: newChatId,
+        mode: "bot",
+        userFirstName: firstName,
+        userLastName: lastName
+      });
+      
+      console.log(`✨ New Telegram chat created: ${newChatId} for user ${from}`);
+      return res.sendStatus(200);
+    }
+
     // Extract file data if present
     let fileUrl = "";
     let fileName = "";
@@ -337,6 +392,7 @@ app.post("/webhook", async (req, res) => {
     // Generate a unique chat ID for each new user or get existing one
     let chatId = userChatMap.get(telegramUserId);
     
+    // Check if the mapped chat still exists, if not create a new one
     if (!chatId || !activeChats.has(chatId)) {
       // Create new chat for this user
       chatId = `tg_${telegramUserId}_${Date.now()}`;
@@ -1243,6 +1299,12 @@ io.on("connection", (socket) => {
         if (!isNaN(agentTelegramId)) {
           agentChatMap.delete(agentTelegramId);
         }
+      }
+      
+      // Clean up Telegram user mapping if this was a Telegram chat
+      if (existingChat.source === "telegram" && existingChat.telegramUserId) {
+        userChatMap.delete(existingChat.telegramUserId);
+        console.log(`🗑️ Removed Telegram user mapping for user ${existingChat.telegramUserId}`);
       }
       
       // Delete the old chat
