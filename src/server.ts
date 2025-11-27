@@ -148,7 +148,15 @@ function emitToDashboard(event: string, payload: any) {
 // Helper to notify all registered agents about new/updated chats
 async function notifyAgents(chatId: string, message: string, isNewChat: boolean = false) {
   const chat = activeChats.get(chatId);
-  if (!chat) return;
+  if (!chat) {
+    console.log(`⚠️ Cannot notify agents - chat ${chatId} not found`);
+    return;
+  }
+
+  if (registeredAgents.size === 0) {
+    console.log(`⚠️ No agents registered yet. Use /start in support bot to register.`);
+    return;
+  }
 
   const userName = chat.userFirstName 
     ? `${chat.userFirstName} ${chat.userLastName || ''}`.trim()
@@ -158,7 +166,10 @@ async function notifyAgents(chatId: string, message: string, isNewChat: boolean 
   const notificationTitle = isNewChat ? "🔔 <b>NEW CHAT CREATED!</b>" : "💬 <b>New Message</b>";
   const notificationText = `${notificationTitle}\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nID: <code>${chatId}</code>\n\nMessage: "${message}"\n\nClick button to open chat`;
 
+  console.log(`📢 Sending ${isNewChat ? 'NEW CHAT' : 'MESSAGE'} notification to ${registeredAgents.size} agents...`);
+
   // Send to all registered agents with inline button
+  let successCount = 0;
   for (const agentId of registeredAgents) {
     try {
       await axios.post(`${supportBotUrl}/sendMessage`, {
@@ -173,12 +184,14 @@ async function notifyAgents(chatId: string, message: string, isNewChat: boolean 
           ]
         }
       });
+      successCount++;
+      console.log(`✅ Notification sent to agent ${agentId}`);
     } catch (error) {
-      console.error(`Failed to notify agent ${agentId}:`, error);
+      console.error(`❌ Failed to notify agent ${agentId}:`, error);
     }
   }
   
-  console.log(`📢 Notified ${registeredAgents.size} agents about ${isNewChat ? 'new chat' : 'message'} ${chatId}`);
+  console.log(`📢 Successfully notified ${successCount}/${registeredAgents.size} agents about ${isNewChat ? 'new chat' : 'message'} ${chatId}`);
 }
 
 // Helper to store message in chat history (in-memory only)
@@ -1403,8 +1416,10 @@ server.listen(PORT, () => {
   console.log(`📱 Webhook URL: ${WEBHOOK_URL}`);
   console.log(`💬 Two-bot mode: Customer + Support agents via Telegram`);
   console.log(`🔌 Socket.IO enabled for real-time dashboard`);
+  console.log(`👥 Registered agents: ${registeredAgents.size}`);
   console.log(`\n📋 Customer Bot Webhook: ${WEBHOOK_URL}/webhook`);
   console.log(`📋 Support Bot Webhook: ${WEBHOOK_URL}/telegram/support/webhook`);
+  console.log(`\n⚠️  IMPORTANT: Agents must use /start in support bot to receive notifications!`);
 });
 
 // Graceful shutdown
