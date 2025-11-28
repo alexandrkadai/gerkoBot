@@ -11,7 +11,7 @@ import { getAutoReply } from "./getAutoReplies.js";
 dotenv.config();
 
 const PORT = process.env.PORT || 3001;
-const FRONTEND_ORIGIN = "https://gerko.io";
+const FRONTEND_ORIGIN = "https://dev.gerko.io";
 const WEBHOOK_URL = process.env.BACKEND_URL || "https://gerkobot.onrender.com";
 
 // Load Telegram tokens
