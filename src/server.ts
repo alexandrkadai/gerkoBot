@@ -175,30 +175,45 @@ async function notifyAgents(
 
   let orgName = 'Unknown';
   let subStatus = 'Unknown';
+  
+  // Fetch organization info if userId is available
   if (chat.userId) {
     try {
-      const { data: accountOwnership, error: aoError } = await supabase
-        .from('account_ownership')
+      // First, get the user's profile to find organization_id
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
         .select('organization_id')
-        .eq('user_id', chat.userId)
+        .eq('id', chat.userId)
         .single();
-      if (!aoError && accountOwnership?.organization_id) {
+      
+      if (!profileError && profile?.organization_id) {
+        // Get organization details
         const { data: org, error: orgError } = await supabase
           .from('organization')
           .select('business_name')
-          .eq('id', accountOwnership.organization_id)
+          .eq('id', profile.organization_id)
           .single();
+        
         if (!orgError && org) {
+          orgName = org.business_name || 'Unknown';
+          
+          // Get subscription status
           const { data: subscription, error: subError } = await supabase
-            .from('susbcriptions')
+            .from('subscriptions')
             .select('status')
-            .eq('id', accountOwnership.organization_id)
+            .eq('organization_id', profile.organization_id)
             .single();
-          if (subError) {
-            console.error(subError);
+          
+          if (!subError && subscription) {
+            subStatus = subscription.status || 'Unknown';
+          } else if (subError) {
+            console.error('Error fetching subscription:', subError);
           }
-          subStatus = subscription?.status;
+        } else if (orgError) {
+          console.error('Error fetching organization:', orgError);
         }
+      } else if (profileError) {
+        console.error('Error fetching user profile:', profileError);
       }
     } catch (error) {
       console.error('Error fetching org info:', error);
