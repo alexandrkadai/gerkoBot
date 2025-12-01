@@ -181,7 +181,7 @@ async function notifyAgents(
     try {
       // First, get the user's profile to find organization_id
       const { data: profile, error: profileError } = await supabase
-        .from('profiles')
+        .from('user_profiles')
         .select('organization_id')
         .eq('id', chat.userId)
         .single();
