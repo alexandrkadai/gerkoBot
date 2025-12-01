@@ -26,7 +26,7 @@ const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL!;
 const supabaseKey =
   process.env.VITE_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseKey);
-
+console.log("🚀 Server Version 99");
 console.log('💬 Using Telegram-only storage (no database)');
 console.log('📦 Supabase Storage initialized for file uploads');
 
