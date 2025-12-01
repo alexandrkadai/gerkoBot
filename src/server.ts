@@ -328,11 +328,57 @@ async function handleBotReply(
       : 'Anonymous';
     const sourceIcon = chat.source === 'web' ? '🌐' : '📱';
 
+    // Fetch organization and subscription info
+    let orgName = 'Unknown';
+    let subStatus = 'Unknown';
+    if (chat.userId) {
+      try {
+        // First, get the user's profile to find organization_id
+        const { data: profile, error: profileError } = await supabase
+          .from('user_profiles')
+          .select('organization_id')
+          .eq('id', chat.userId)
+          .single();
+        
+        if (!profileError && profile?.organization_id) {
+          // Get organization details
+          const { data: org, error: orgError } = await supabase
+            .from('organization')
+            .select('business_name')
+            .eq('id', profile.organization_id)
+            .single();
+          
+          if (!orgError && org) {
+            orgName = org.business_name || 'Unknown';
+            
+            // Get subscription status
+            const { data: subscription, error: subError } = await supabase
+              .from('subscriptions')
+              .select('status')
+              .eq('organization_id', profile.organization_id)
+              .single();
+            
+            if (!subError && subscription) {
+              subStatus = subscription.status || 'Unknown';
+            } else if (subError) {
+              console.error('Error fetching subscription:', subError);
+            }
+          } else if (orgError) {
+            console.error('Error fetching organization:', orgError);
+          }
+        } else if (profileError) {
+          console.error('Error fetching user profile:', profileError);
+        }
+      } catch (error) {
+        console.error('Error fetching org info:', error);
+      }
+    }
+
     for (const agentId of registeredAgents) {
       try {
         await axios.post(`${supportBotUrl}/sendMessage`, {
           chat_id: agentId,
-          text: `🙋 <b>SUPPORT REQUESTED!</b>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nID: <code>${chatId}</code>\n\nUser needs help!`,
+          text: `🙋 <b>SUPPORT REQUESTED!</b>\n\n👤 User: ${userName}\n${sourceIcon} Source: ${chat.source}\nOrganization Name: <code>${orgName}</code>\n\nSubscription Status: <code>${subStatus}</code>\n\nUser needs help!`,
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
