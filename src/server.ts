@@ -11,8 +11,8 @@ import { getAutoReply } from './getAutoReplies.js';
 dotenv.config();
 
 const PORT = process.env.PORT || 3001;
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGINS 
-  ? process.env.FRONTEND_ORIGINS.split(',').map(o => o.trim())
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN 
+  ? process.env.FRONTEND_ORIGIN.split(',').map(o => o.trim())
   : ['http://localhost:8080'];
 const WEBHOOK_URL = process.env.BACKEND_URL || 'https://gerkobot.onrender.com';
 
