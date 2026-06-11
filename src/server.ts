@@ -1049,8 +1049,17 @@ app.post('/telegram/support/webhook', async (req, res) => {
 // HTTP ENDPOINTS FOR DASHBOARD
 // =====================================================
 
-// Simple health route
-app.get('/health', (req, res) => res.json({ ok: true }));
+// Health route for uptime monitoring (UptimeRobot)
+app.get('/health', (req, res) =>
+  res.json({
+    ok: true,
+    status: 'up',
+    uptime: Math.floor(process.uptime()),
+    activeChats: activeChats.size,
+    registeredAgents: registeredAgents.size,
+    timestamp: new Date().toISOString(),
+  })
+);
 
 // Send message to user (agent message)
 app.post('/send', async (req, res) => {
