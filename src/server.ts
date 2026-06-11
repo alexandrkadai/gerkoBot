@@ -1178,6 +1178,9 @@ app.post('/api/chat/session', async (req, res) => {
       });
       created = true;
       console.log(`✨ New web chat session created: ${chatId}`);
+
+      // Notify all agents about new web chat
+      await notifyAgents(chatId, '[Chat started]', true);
     }
 
     chat = activeChats.get(chatId)!;
@@ -1465,7 +1468,7 @@ io.on('connection', (socket) => {
   // Handle new chat creation
   socket.on(
     'create_new_chat',
-    ({
+    async ({
       chatId,
       firstName,
       lastName,
@@ -1509,6 +1512,9 @@ io.on('connection', (socket) => {
       storeMessage(chatId, welcomeMessage, userId);
       emitToDashboard('bot_message', { chatId, text: welcomeMessage.text });
 
+      // Notify all agents about new web chat
+      await notifyAgents(chatId, '[Chat started]', true);
+
       console.log(`✅ New chat ${chatId} created successfully`);
     }
   );
@@ -1516,7 +1522,7 @@ io.on('connection', (socket) => {
   // Handle user info updates
   socket.on(
     'user_info',
-    ({
+    async ({
       chatId,
       firstName,
       lastName,
@@ -1554,6 +1560,9 @@ io.on('connection', (socket) => {
         };
         storeMessage(chatId, welcomeMessage, userId);
         emitToDashboard('bot_message', { chatId, text: welcomeMessage.text });
+
+        // Notify all agents about new web chat
+        await notifyAgents(chatId, '[Chat started]', true);
       } else {
         // Update existing chat info
         if (firstName) chat.userFirstName = firstName;
